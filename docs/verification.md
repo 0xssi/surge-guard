@@ -2543,3 +2543,23 @@ begin/end, actual shutdown/restart submission, live policy changes during Surge
 launch, privileged log collection, PF/DNS mutation, real device/network failures,
 or packet-level enforcement acceptance. The lock child and injected callbacks
 operate only on temporary fixtures; they are not a real system-update pass.
+
+## 2026-11-06 — Gate launch failure wording
+
+Gate's unverified-startup error now labels the observed exit status as belonging
+to the `launchctl` submission client and explicitly reports the launchd job/Surge
+exit status as unavailable. It no longer claims the job exited when no child
+was observed. Launch settlement, pending markers, retry timing and PF permission
+are unchanged; this is a wording-only correction, with no new test helper.
+
+Performed:
+
+- `scripts/check.sh` passed with 101 PASS records, including existing pending
+  launch/failure/observer regressions, release compilation and CLI checks.
+- Release `diagnose --minutes 0 --json` returned parseable failure JSON.
+  Human and JSON log rendering preserved a synthetic startup failure whose
+  submission client exited with status 0 and whose job exit status is unavailable.
+
+Not performed: reinstalling or restarting services, a real failed Surge launch,
+live PF mutation or packet-level acceptance. Bootstrap, hotspot and IPv6 policy
+boundaries were not changed or validated on a live network in this correction.

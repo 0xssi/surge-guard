@@ -205,8 +205,8 @@ func ensureSurge(quitTimeout: Double) throws -> SurgeLaunchResult {
             if state.disposition == .settled { try state.request.complete(); return .launched }
             if state.disposition == .failed {
                 try state.request.complete()
-                let status = task.isRunning ? "unavailable" : String(task.terminationStatus)
-                throw GuardError("One-shot Surge job exited without verified startup (launchctl status \(status))")
+                let submissionStatus = task.isRunning ? "unavailable" : String(task.terminationStatus)
+                throw GuardError("Surge startup was not verified (launchctl submission client exit status: \(submissionStatus); launchd job/Surge exit status: unavailable)")
             }
         }
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
