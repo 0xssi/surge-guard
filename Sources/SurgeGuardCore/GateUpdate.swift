@@ -38,7 +38,7 @@ public struct GateUpdate: Codable, Equatable {
 
     public func acknowledged(by update: GateUpdate?, state: String, fresh: Bool) -> Bool {
         fresh && update == self && (paused ? state == "update_paused" :
-            ["ready", "restoring", "waiting", "waiting_identity", "unknown"].contains(state))
+            ["ready", "restoring", "waiting", "waiting_network", "waiting_identity", "unknown"].contains(state))
     }
 }
 
@@ -72,6 +72,8 @@ public struct GatePendingLaunch: Codable, Equatable {
     public let bootId: String
     public let observer: UUID?
     public var child: SurgeProcess?
+    public var launchd: Bool?
+    public var submission: SurgeProcess?
     public static var path: String { UserPaths.directory + "/pending-launch.json" }
     public init(app: String, observer: UUID? = nil) {
         id = UUID(); self.app = app; bootId = SystemClock.bootID; self.observer = observer
@@ -90,13 +92,25 @@ public struct GatePendingLaunch: Codable, Equatable {
         return self.observer == observer ? .failed : .orphaned
     }
 
-    public func save(at path: String = path) throws {
+    public func launchdDisposition(job: GateLaunchJob.State, submissionRunning: Bool?,
+                                   verifiedApp: SurgeProcess?, childIdentity: SurgeProcess?) -> Disposition {
+        // The launchctl client finishing does not mean its job has finished launching.
+        if submissionRunning == true { return .inFlight }
+        if let child, child == childIdentity, child == verifiedApp { return .settled }
+        if job != .absent || (child != nil && child == childIdentity) { return .inFlight }
+        if submissionRunning == false || child != nil { return .failed }
+        return .orphaned
+    }
+
+    public func save(at path: String = path, requireExisting: Bool = false) throws {
         let fd = try UserPaths.lock(at: path + ".lock", timeout: 2)
         defer { close(fd) }
-        guard try Self.load(from: path).map({ $0.id == id }) ?? true else {
+        guard try Self.load(from: path).map({ $0.id == id }) ?? !requireExisting else {
             throw GuardError("An earlier application launch has not settled")
         }
-        try AtomicFile.write(try JSON.encode(self), to: path, mode: 0o600)
+        let encoded = try JSON.encode(self)
+        _ = try Self.decode(Data(encoded.utf8))
+        try AtomicFile.write(encoded, to: path, mode: 0o600)
     }
 
     public func complete(at path: String = path) throws {
@@ -111,16 +125,32 @@ public struct GatePendingLaunch: Codable, Equatable {
         guard let request = try load(from: path), request.id == id, request.observer != observer, request.child == nil else {
             throw GuardError("Launch recovery requires the exact orphaned request; inspect fresh Gate status")
         }
+        if request.launchd == true {
+            guard try GateLaunchJob.state(request.id) == .absent,
+                  request.submission == nil else {
+                throw GuardError("Launch recovery cannot clear a queued job or recorded launchctl submission")
+            }
+        }
         try FileManager.default.removeItem(atPath: path)
     }
     public static func load(from path: String = path) throws -> GatePendingLaunch? {
         guard let data = try UserPaths.readPrivate(path) else { return nil }
+        let value = try decode(data)
+        return value.bootId == SystemClock.bootID ? value : nil
+    }
+
+    private static func decode(_ data: Data) throws -> GatePendingLaunch {
+        guard data.count <= 4096 else { throw GuardError("Oversized pending launch") }
         let value = try JSON.decode(Self.self, from: data)
         guard GateConfiguration.validBundleID(value.app), !value.bootId.isEmpty,
-              value.child.map({ $0.pid > 1 && $0.startedSeconds > 0 && (0..<1_000_000).contains($0.startedMicroseconds) }) ?? true else {
+              [value.child, value.submission].allSatisfy({ identity in
+                  identity.map { $0.pid > 1 && $0.startedSeconds > 0 && (0..<1_000_000).contains($0.startedMicroseconds) } ?? true
+              }),
+              value.launchd == nil || (value.launchd == true && value.app == "com.nssurge.surge-mac"),
+              value.submission == nil || value.launchd == true else {
             throw GuardError("Invalid pending launch")
         }
-        return value.bootId == SystemClock.bootID ? value : nil
+        return value
     }
 }
 

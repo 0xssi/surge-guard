@@ -193,20 +193,9 @@ public enum Probe {
         guard geteuid() != 0, getuid() == (try consoleUID()) else {
             throw GuardError("Surge CLI queries must run as the console user")
         }
-        let status = try Command.checked(surgeCLI, ["--raw", "status"])
-        guard let object = try JSONSerialization.jsonObject(with: Data(status.utf8)) as? [String: Any],
-              let mode = object["mode"] as? String,
-              let features = object["features"] as? [String: Any],
-              let enhanced = features["enhanced-mode"] as? Bool else {
-            throw GuardError("Surge returned incomplete mode/feature status")
+        return try SessionObservation.collect(configuration: configuration) { arguments in
+            try Command.checked(surgeCLI, arguments)
         }
-        var routes: [RouteResult] = []
-        for check in configuration.routeChecks {
-            // shortcut: URL default context only; add request overrides when gating process/protocol-specific rules.
-            let response = try Command.checked(surgeCLI, ["--raw", "rule", "explain", check.url])
-            routes.append(try RouteResult.evaluate(Data(response.utf8), check: check))
-        }
-        return SessionObservation(policyFingerprint: try configuration.fingerprint(), mode: mode, enhancedMode: enhanced, routes: routes)
     }
 
     public static func privilegedSession(configuration: Configuration, helperPath: String = Paths.binary) throws -> SessionObservation {
@@ -215,7 +204,7 @@ public enum Probe {
         // Enter the user's bootstrap namespace, then drop UID/GID inside our
         // root-owned helper before executing any user-owned Surge code.
         let response = try Command.checked("/bin/launchctl", ["asuser", String(uid), helperPath, "session-probe", String(uid)],
-                                           timeout: Double(configuration.routeChecks.count + 1) * 3 + 3)
+                                           timeout: 3)
         guard uid == (try consoleUID()) else { throw GuardError("Console user changed during rule probe") }
         let observation = try JSON.decode(SessionObservation.self, from: Data(response.utf8))
         guard observation.policyFingerprint == (try configuration.fingerprint()) else {
@@ -295,6 +284,26 @@ public enum Probe {
         try trustedSurgePID() != nil
     }
 
+    public static func startupNetworkReady(primaryInterface: String?, addresses: [InterfaceAddress]) -> Bool {
+        guard let primaryInterface, !primaryInterface.isEmpty else { return false }
+        return addresses.contains { address in
+            var ipv4 = in_addr()
+            return address.name == primaryInterface && address.up && !address.loopback &&
+                !address.address.utf8.contains(0) && inet_pton(AF_INET, address.address, &ipv4) == 1
+        }
+    }
+
+    public static func startupNetworkReady() throws -> Bool {
+        guard let store = SCDynamicStoreCreate(nil, "surge-gate.startup-network" as CFString, nil, nil) else {
+            throw GuardError("Cannot open SystemConfiguration store for Surge startup")
+        }
+        let primary = try networkDictionary("State:/Network/Global/IPv4", read: {
+            SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString)
+        })
+        // A DHCP address alone is insufficient while captive evaluation withholds the primary network.
+        return startupNetworkReady(primaryInterface: primary?["PrimaryInterface"] as? String, addresses: try addresses())
+    }
+
     public static func surgeInterface() throws -> String {
         guard let store = SCDynamicStoreCreate(nil, "surge-guard.interface" as CFString, nil, nil),
               let primary = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
@@ -322,19 +331,28 @@ public enum Probe {
         }
     }
 
+    public static func networkDictionary(_ key: String, read: () -> Any?, error: () -> Int32 = SCError) throws -> [String: Any]? {
+        guard let value = read() else {
+            let status = error()
+            guard status == kSCStatusNoKey else { throw GuardError("Cannot read network state \(key): \(status)") }
+            return nil
+        }
+        guard let dictionary = value as? [String: Any] else { throw GuardError("Invalid network state dictionary: \(key)") }
+        return dictionary
+    }
+
     public static func readiness(trustedProcess: Bool? = nil) throws -> Readiness {
         guard let store = SCDynamicStoreCreate(nil, "surge-guard.probe" as CFString, nil, nil) else {
             throw GuardError("Cannot open SystemConfiguration store")
         }
-        func dictionary(_ key: String) -> [String: Any] {
-            SCDynamicStoreCopyValue(store, key as CFString) as? [String: Any] ?? [:]
+        func dictionary(_ key: String) throws -> [String: Any]? {
+            try networkDictionary(key, read: { SCDynamicStoreCopyValue(store, key as CFString) })
         }
-        let primary = dictionary("State:/Network/Global/IPv4")
-        let globalIPv6 = dictionary("State:/Network/Global/IPv6")
+        let primary = try dictionary("State:/Network/Global/IPv4") ?? [:]
+        let globalIPv6 = try dictionary("State:/Network/Global/IPv6")
         let service = primary["PrimaryService"] as? String ?? ""
         let interface = primary["PrimaryInterface"] as? String ?? ""
-        let ipv6Interface = globalIPv6.isEmpty ? nil :
-            (globalIPv6["PrimaryInterface"] as? String ?? "")
+        let ipv6Interface = globalIPv6.map { $0["PrimaryInterface"] as? String ?? "" }
         let surgeService = isSurgeService(service, store: store)
         let connection = surgeService ? SCNetworkConnectionCreateWithServiceID(nil, service as CFString, nil, nil) : nil
         let connected = connection.map { SCNetworkConnectionGetStatus($0) == .connected } ?? false

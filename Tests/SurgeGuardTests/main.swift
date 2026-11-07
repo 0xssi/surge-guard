@@ -3,6 +3,21 @@ import SurgeGuardCore
 import Darwin
 import SystemConfiguration
 
+if Array(CommandLine.arguments.dropFirst()) == ["--diagnostic-save-check"] {
+    do { try diagnosticSaveCheck(); exit(0) }
+    catch { fputs("FAIL: \(error)\n", stderr); exit(1) }
+}
+
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--diagnostic-lock-check" {
+    do { try diagnosticLockCheck(CommandLine.arguments[2]); exit(0) }
+    catch { fputs("FAIL: \(error)\n", stderr); exit(1) }
+}
+
+if Array(CommandLine.arguments.dropFirst()) == ["--gate-launchd-check"] {
+    do { try gateLaunchdCheck(); exit(0) }
+    catch { fputs("FAIL: \(error)\n", stderr); exit(1) }
+}
+
 if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--gate-exit-fixture",
    let status = Int32(CommandLine.arguments[3]) {
     switch CommandLine.arguments[2] {
@@ -104,6 +119,11 @@ func rejects(_ operation: () throws -> Void) throws {
 }
 
 do {
+    try systemUpdateTests()
+    try gateLaunchTests()
+    try diagnosticTests()
+    try usbTCPTests()
+    try protectionTests()
     let gateActions = ["install", "setup", "run", "start", "stop", "restart", "uninstall", "edit-config", "update-pause", "update-resume"]
     for action in gateActions {
         try check(try GateCommand.action([action]) == action, "Valid Gate action rejected")
@@ -243,7 +263,7 @@ do {
     _ = try Probe.addresses()
     print("PASS: bounded timestamp conversion and explicit interface inventory failures")
 
-    let cleanup = Firewall()
+    let cleanup = Firewall(historyPath: nil)
     var cleared: [String] = []
     try cleanup.clearStates(addresses: { ["192.0.2.1", "2001:db8::1"] }) { cleared.append($0) }
     cleared = []
@@ -784,8 +804,12 @@ do {
         printf '%s %s\\n' "$kind" "$*" >> '\(directory)/calls'
         case "$kind" in
           id) echo 501 ;;
-          sudo) case "$1" in -v) exit 0 ;; -n) shift ;; esac; exec "$@" ;;
-          guard) case "$1" in --help) echo legacy ;; check) exit 0 ;; esac ;;
+          sudo) case "$1" in -v) if [ -f '\(directory)/auth-failed' ]; then exit 1; fi; exit 0 ;; -n) shift ;; esac; exec "$@" ;;
+          guard) case "$1" in
+            --help) if [ -f '\(directory)/maintenance-capable' ]; then echo 'restore-policy os-update-begin'; else echo legacy; fi ;;
+            os-update-begin|os-update-end) if [ -f '\(directory)/maintenance-failed' ]; then exit 7; fi ;;
+            check) exit 0 ;;
+          esac ;;
           launchctl)
             if [ "$1" = print ] && [ -f '\(directory)/second-failed' ]; then
               if [ -f '\(directory)/queried' ]; then echo 'Service query failed'; exit 5; fi
@@ -806,7 +830,10 @@ do {
             if [ -f '\(directory)/stuck' ]; then exit 0; fi
             if [ ! -f '\(directory)/exited' ]; then touch '\(directory)/exited'; exit 0; fi
             exit 1 ;;
-          pfctl) exit 0 ;;
+          lockf)
+            if [ -f '\(directory)/lock-busy' ]; then exit 75; fi
+            shift 4; exec "$@" ;;
+          logger|pfctl) exit 0 ;;
           tail)
             if [ -f '\(directory)/tail-failed' ]; then exit 5; fi
             printf '%s\\n' '{"event":"gate_state","message":"0 application(s) pending"}' ;;
@@ -818,8 +845,8 @@ do {
         let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         var script = try String(contentsOf: project.appendingPathComponent("integrations/swiftbar/surge-guard-action.sh"))
         script = script.replacingOccurrences(of: "guard_bin=/Library/PrivilegedHelperTools/surge-guard", with: "guard_bin='\(directory)/guard'")
-        for tool in ["launchctl", "kill", "sleep", "pfctl", "tail"] {
-            let original = tool == "pfctl" ? "/sbin/pfctl" : tool == "tail" ? "/usr/bin/tail" : "/bin/" + tool
+        for tool in ["launchctl", "kill", "sleep", "pfctl", "tail", "lockf", "logger"] {
+            let original = tool == "pfctl" ? "/sbin/pfctl" : ["tail", "lockf", "logger"].contains(tool) ? "/usr/bin/" + tool : "/bin/" + tool
             script = script.replacingOccurrences(of: original, with: "'\(directory)/\(tool)'")
         }
         script = script.replacingOccurrences(of: "sudo ", with: "'\(directory)/sudo' ")
@@ -828,21 +855,53 @@ do {
         script = script.replacingOccurrences(of: "renderer=\"$HOME/Library/Application Support/SurgeGuard/bin/surge-guard-ui\"", with: "renderer='\(rendererPath)'")
         let gatePath = directory + "/gate"
         script = script.replacingOccurrences(of: "gate_bin=\"$HOME/Library/Application Support/SurgeGuard/bin/surge-gate\"", with: "gate_bin='\(gatePath)'")
-        try "#!/bin/sh\nprintf 'gate %s\\n' \"$*\" >> '\(directory)/calls'\n".write(toFile: gatePath, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\nprintf 'gate %s\\n' \"$*\" >> '\(directory)/calls'\nif [ -f '\(directory)/gate-failed' ]; then exit 9; fi\n".write(toFile: gatePath, atomically: true, encoding: .utf8)
         chmod(gatePath, 0o700)
         let rendererScript = "#!/bin/sh\nprintf 'renderer %s\\n' \"$*\" >> '\(directory)/calls'\nprintf 'rendered: '\n/bin/cat\n"
         try rendererScript.write(toFile: rendererPath, atomically: true, encoding: .utf8); chmod(rendererPath, 0o700)
-        for tool in ["guard", "sudo", "launchctl", "kill", "sleep", "pfctl", "tail", "id"] {
+        for tool in ["guard", "sudo", "launchctl", "kill", "sleep", "pfctl", "tail", "id", "lockf", "logger"] {
             let wrapper = "#!/bin/sh\nexec '\(mock)' \(tool) \"$@\"\n"
             let path = directory + "/" + tool
             try wrapper.write(toFile: path, atomically: true, encoding: .utf8); chmod(path, 0o700)
         }
         let testScript = directory + "/action.sh"
         try script.write(toFile: testScript, atomically: true, encoding: .utf8)
+        for action in ["diagnose", "diagnose-watch"] {
+            try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
+            let result = try Command.run("/bin/bash", [testScript, action], timeout: 5)
+            let diagnosticCalls = try String(contentsOfFile: directory + "/calls")
+            let expected = action == "diagnose" ? "renderer diagnose\n" : "renderer diagnose --watch-seconds 120\n"
+            try check(result.status == 0 && diagnosticCalls.contains(expected) && !diagnosticCalls.contains("guard ") &&
+                      !diagnosticCalls.contains("pfctl") && !diagnosticCalls.contains("sudo " + rendererPath),
+                      "Diagnostic menu queried the guard, changed PF or ran the user collector as root")
+        }
+        try "".write(toFile: directory + "/auth-failed", atomically: true, encoding: .utf8)
+        let partialDiagnostic = try Command.run("/bin/bash", [testScript, "diagnose"], timeout: 5)
+        try check(partialDiagnostic.status == 0 && partialDiagnostic.output.contains("证据并标明缺口"),
+                  "Cancelled private-log authentication prevented partial diagnostics")
+        try FileManager.default.removeItem(atPath: directory + "/auth-failed")
+        for action in ["gate-update-pause", "gate-update-resume"] {
+            let completed = try Command.run("/bin/bash", [testScript, action], timeout: 5)
+            try check(completed.status == 0 && completed.output.contains("Gate 已确认"), "Upgrade guidance did not wait for successful Gate acknowledgement")
+            try "".write(toFile: directory + "/gate-failed", atomically: true, encoding: .utf8)
+            let failed = try Command.run("/bin/bash", [testScript, action], timeout: 5)
+            try check(failed.status != 0 && !failed.output.contains("Gate 已确认"), "Upgrade action claimed success after a Gate error")
+            try FileManager.default.removeItem(atPath: directory + "/gate-failed")
+        }
+        try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
         let recovered = try Command.run("/bin/sh", [testScript, "unlock"], timeout: 10)
         try check(recovered.status == 0 && recovered.output.contains("Protection is OFF"), "Offline recovery failed against legacy fixture: \(recovered.combined)")
         let calls = try String(contentsOfFile: directory + "/calls")
         try check(calls.range(of: "kill -0")!.lowerBound < calls.range(of: "pfctl -a io.github.surge-guard -F rules")!.lowerBound, "Rules cleared before daemon exit check")
+        try check(calls.contains("lockf -k -t 20 /private/var/db/surge-guard/management.lock") &&
+                  calls.contains("lockf -k -t 20 /private/var/db/surge-guard/lock") && calls.contains("manual_unlock"),
+                  "Independent recovery bypassed management/runtime locking or lost its system-log event")
+        try "".write(toFile: directory + "/lock-busy", atomically: true, encoding: .utf8)
+        try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
+        let busyRecovery = try Command.run("/bin/bash", [testScript, "unlock"], timeout: 5)
+        try check(busyRecovery.status != 0 && !String(contentsOfFile: directory + "/calls").contains("\npfctl -a"),
+                  "Independent recovery cleared rules despite a concurrent management/daemon lock")
+        try FileManager.default.removeItem(atPath: directory + "/lock-busy")
         try FileManager.default.removeItem(atPath: directory + "/stopped")
         let restarted = try Command.run("/bin/sh", [testScript, "restart"], timeout: 10)
         try check(restarted.status == 0 && restarted.output.contains("pid=5678"), "Legacy restart did not wait for new PID: \(restarted.combined)")
@@ -922,11 +981,32 @@ do {
         let pluginPath = directory + "/plugin.sh"
         try ("HOME='\(directory)'\n" + plugin).write(toFile: pluginPath, atomically: true, encoding: .utf8)
         let fallback = try Command.checked("/bin/sh", [pluginPath, "--section"])
-        try check(fallback.contains("param1=unlock") && !fallback.contains("---"), "Missing independent fallback when renderer is absent")
+        try check(fallback.contains("param1=unlock") && fallback.contains("param1=os-update-end") && !fallback.contains("---"),
+                  "Missing independent recovery/maintenance fallback when renderer is absent")
+        for action in ["os-update-begin", "os-update-end"] {
+            try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
+            let legacy = try Command.run("/bin/bash", [testScript, action])
+            let legacyCalls = try String(contentsOfFile: directory + "/calls")
+            try check(legacy.status != 0 && !legacyCalls.contains("sudo") && !legacyCalls.contains("pfctl"),
+                      "Maintenance action attempted privileged changes with an unsupported guard")
+            try "".write(toFile: directory + "/maintenance-capable", atomically: true, encoding: .utf8)
+            try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
+            let supported = try Command.run("/bin/bash", [testScript, action])
+            let supportedCalls = try String(contentsOfFile: directory + "/calls")
+            try check(supported.status == 0 && supportedCalls.contains("sudo \(directory)/guard " + action) &&
+                      !supportedCalls.contains("pfctl"), "Maintenance action did not delegate only to the installed root helper")
+            if action == "os-update-begin" {
+                try check(supported.output.contains("ALL applications across reboots"), "Maintenance menu omitted the direct-access scope")
+            }
+            try "".write(toFile: directory + "/maintenance-failed", atomically: true, encoding: .utf8)
+            try check(try Command.run("/bin/bash", [testScript, action]).status == 7, "Maintenance menu concealed helper failure")
+            for marker in ["maintenance-failed", "maintenance-capable"] { try FileManager.default.removeItem(atPath: directory + "/" + marker) }
+        }
     }
     print("PASS: offline legacy recovery waits for exit and refuses to flush while daemon remains alive")
     print("PASS: emergency recovery avoids the guard executable and refuses unknown queries or missing running PIDs")
     print("PASS: SwiftBar log bridge formats without sudo and propagates privileged-reader failure")
+    print("PASS: maintenance menu checks installed capabilities, warns about all apps, retains fallback and propagates failure")
 
     for mask in 0..<64 {
         let state = Readiness(trustedProcess: mask & 1 != 0,
@@ -1053,7 +1133,7 @@ do {
                       "LAN rules failed to constrain both the peer and actual local interface/address")
         }
     }
-    let lanFirewall = Firewall()
+    let lanFirewall = Firewall(historyPath: nil)
     try check(try lanFirewall.setLANTCP(lanBindings) && !lanFirewall.setLANTCP(lanBindings), "Stable LAN inventory caused reloads")
     try rejects { _ = try lanFirewall.setLANTCP(lanBindings + lanBindings) }
     try check(lanFirewall.lanTCPBindings == lanBindings, "Rejected LAN inventory changed pending rules")
@@ -1234,9 +1314,10 @@ do {
         (true, true, "ready", [String](), true, true),
         (false, true, "ready", [], true, false), (true, false, "ready", [], true, false),
         (true, true, "ready", [], false, false), (true, true, "ready", ["com.example.A"], true, false),
-        (true, true, "waiting", [], true, false), (true, true, "restoring", [], true, false),
+        (true, true, "waiting", [], true, false), (true, true, "waiting_network", [], true, false), (true, true, "restoring", [], true, false),
         (true, true, "error", [], true, false), (true, true, "unknown", [], true, false), (true, true, "shutting_down", [], true, false),
         (true, true, "update_paused", [], true, false), (true, true, "waiting_identity", [], true, false),
+        (true, true, "os_update_paused", [], true, false), (true, true, "os_update_waiting", [], true, false),
         (true, true, "recovery_failed", [], true, false), (true, true, "launch_recovery_required", [], true, false)
     ] {
         let object: [String: Any] = ["running": running, "fresh": fresh, "status": ["state": state, "pending": pending]]
@@ -1266,7 +1347,9 @@ do {
               !resume.acknowledged(by: resume, state: "recovery_failed", fresh: true),
               "Stale, different or unfinished update request acknowledged")
     try check(resume.acknowledged(by: resume, state: "waiting", fresh: true) &&
+              resume.acknowledged(by: resume, state: "waiting_network", fresh: true) &&
               resume.acknowledged(by: resume, state: "unknown", fresh: true), "Resume incorrectly required verified network permission")
+    try check(!pause.acknowledged(by: pause, state: "waiting_network", fresh: true), "Network waiting acknowledged an update pause")
     for bad in ["{}", "{\"paused\":true}", String(repeating: " ", count: 4097),
                 String(decoding: pauseData, as: UTF8.self).replacingOccurrences(of: "\"version\":1", with: "\"version\":2")] {
         try rejects { _ = try GateUpdate.decode(Data(bad.utf8)) }
@@ -1296,6 +1379,32 @@ do {
     retry.succeeded(at: 5, launched: false)
     try check(retry.failure == nil && retry.canAttempt(at: 5), "Manual recovery did not clear failure backoff")
     print("PASS: persistent update pause, bounded private reads, fresh request acknowledgement and recovery retry backoff")
+
+    let startupAddress = InterfaceAddress(name: "en7", address: "192.0.2.2", up: true, loopback: false)
+    var startupRetry = GateRetry()
+    for tick in 0..<45 {
+        try check(!Probe.startupNetworkReady(primaryInterface: nil, addresses: [startupAddress]),
+                  "DHCP address started Surge before macOS published the primary network")
+        startupRetry.succeeded(at: Double(tick), launched: false)
+    }
+    try check(Probe.startupNetworkReady(primaryInterface: "en7", addresses: [startupAddress]) && startupRetry.canAttempt(at: 45),
+              "Published primary network did not permit immediate startup after captive evaluation")
+    for primary in [nil, "", "en0"] as [String?] {
+        try check(!Probe.startupNetworkReady(primaryInterface: primary, addresses: [startupAddress]), "Missing/wrong primary interface permitted startup")
+    }
+    for addresses in [[InterfaceAddress](),
+                      [InterfaceAddress(name: "en7", address: "192.0.2.2", up: false, loopback: false)],
+                      [InterfaceAddress(name: "en7", address: "127.0.0.1", up: true, loopback: true)],
+                      [InterfaceAddress(name: "en7", address: "2001:db8::1", up: true, loopback: false)],
+                      [InterfaceAddress(name: "en7", address: "invalid", up: true, loopback: false)]] {
+        try check(!Probe.startupNetworkReady(primaryInterface: "en7", addresses: addresses), "Unusable primary interface permitted startup")
+    }
+    let startupWaitLog = "{\"component\":\"SurgeGate\",\"event\":\"gate_waiting_network\",\"message\":\"Waiting for primary network\",\"details\":{\"pending_count\":0}}"
+    try check(LogReader.format(startupWaitLog).contains("暂不启动 Surge") && !LogReader.format(startupWaitLog).contains("应用恢复完成") &&
+              LogReader.format(startupWaitLog, json: true).contains("Waiting for primary network"), "Startup wait log hid its cause or claimed recovery completed")
+    let startupMenu = try JSON.decode(GateStatusReport.self, from: Data("{\"running\":true,\"fresh\":true,\"status\":{\"state\":\"waiting_network\",\"pending\":[]}}".utf8))
+    try check(startupMenu.menuTitle(guardAllowed: true).contains("等待 macOS 主网络"), "Startup wait menu hid the native network dependency")
+    print("PASS: startup waits for the native primary IPv4 network, survives captive delay without cooldown, and exposes honest wait status")
 
     var auditMenu = PacketAuditSnapshot(capacityMegabytes: 256)
     auditMenu.surgeHistoryHasGaps = true

@@ -6,20 +6,35 @@ label=io.github.surge-guard
 action=${1:---help}
 if [ "$#" -gt 1 ]; then printf '%s\n' 'Expected one action.' >&2; exit 2; fi
 case "$action" in
-    --help) printf '%s\n' 'Actions: restart, start, unlock, backup, rollback, restore-policy, logs, follow-logs, audit-logs, audit-requests, doctor, open-surge, gate-update-pause, gate-update-resume, gate-start, gate-stop'; exit 0 ;;
-    restart|start|unlock|backup|rollback|restore-policy|logs|follow-logs|audit-logs|audit-requests|doctor|open-surge|gate-update-pause|gate-update-resume|gate-start|gate-stop) ;;
+    --help) printf '%s\n' 'Actions: restart, start, unlock, backup, rollback, restore-policy, os-update-begin, os-update-end, logs, follow-logs, audit-logs, audit-requests, diagnose, diagnose-watch, doctor, open-surge, gate-update-pause, gate-update-resume, gate-start, gate-stop'; exit 0 ;;
+    restart|start|unlock|backup|rollback|restore-policy|os-update-begin|os-update-end|logs|follow-logs|audit-logs|audit-requests|diagnose|diagnose-watch|doctor|open-surge|gate-update-pause|gate-update-resume|gate-start|gate-stop) ;;
     *) printf '%s\n' 'Unknown recovery action.' >&2; exit 2 ;;
 esac
 if [ "$(id -u)" -eq 0 ]; then printf '%s\n' 'Run this menu action as your normal user.' >&2; exit 1; fi
 if [ "$action" = open-surge ]; then exec /usr/bin/open -a Surge; fi
 case "$action" in
+    diagnose|diagnose-watch)
+        renderer="$HOME/Library/Application Support/SurgeGuard/bin/surge-guard-ui"
+        if [ ! -x "$renderer" ]; then printf '%s\n' 'Reinstall the user menu renderer for diagnostics.' >&2; exit 1; fi
+        printf '%s\n' '只读诊断：认证仅用于读取私有系统日志；不修改 PF、DNS 或服务。报告含本机地址和域名，请勿公开。'
+        if ! sudo -v; then printf '%s\n' '私有系统日志认证未完成，继续收集可读取的证据并标明缺口。'; fi
+        if [ "$action" = diagnose-watch ]; then exec "$renderer" diagnose --watch-seconds 120; fi
+        exec "$renderer" diagnose ;;
+esac
+case "$action" in
     gate-update-pause|gate-update-resume|gate-start|gate-stop)
         gate_bin="$HOME/Library/Application Support/SurgeGuard/bin/surge-gate"
         if [ ! -x "$gate_bin" ]; then printf '%s\n' 'SurgeGate is not installed.' >&2; exit 1; fi
-        if [ "$action" = gate-update-resume ]; then
-            printf '%s\n' 'Use this only after the official Surge update has completed or been cancelled. This does not repair or terminate the updater.'
-        fi
-        exec "$gate_bin" "${action#gate-}" ;;
+        case "$action" in
+            gate-update-pause) printf '%s\n' '准备升级 Surge：等待 Gate 确认暂停自动重开、身份修复与应用恢复。PF 保护继续保留。' ;;
+            gate-update-resume) printf '%s\n' '请确认官方升级已完成或取消，再恢复自动操作；此操作不修复或终止更新器。' ;;
+        esac
+        "$gate_bin" "${action#gate-}"
+        case "$action" in
+            gate-update-pause) printf '%s\n' 'Gate 已确认暂停。现在可通过 Surge 官方入口升级；完成或取消后点击「升级结束并恢复 Surge」。' ;;
+            gate-update-resume) printf '%s\n' 'Gate 已确认恢复自动操作。请查看菜单中的身份、增强模式及 PF 验证结果；确认恢复不等于已恢复联网。' ;;
+        esac
+        exit 0 ;;
 esac
 
 service_snapshot() {
@@ -76,6 +91,10 @@ case "$action" in
         help_text=$("$guard_bin" --help 2>/dev/null || true)
         case "$help_text" in *restore-policy*) modern=1 ;; esac
         case "$action" in
+            os-update-begin|os-update-end)
+                case "$help_text" in *os-update-begin*) ;; *)
+                    printf '%s\n' 'Upgrade Guard and Gate before using system update maintenance.' >&2; exit 1 ;;
+                esac ;;
             backup|rollback|restore-policy)
                 if [ "$modern" -ne 1 ]; then
                     printf '%s\n' 'The installed legacy guard has no trusted backup/rollback commands. Upgrade only after this recovery menu is present.' >&2
@@ -85,8 +104,10 @@ case "$action" in
 esac
 printf 'surge-guard · %s\n' "$action"
 case "$action" in
+    os-update-begin) printf '%s\n' 'WARNING: this suspends SurgeGuard protection for ALL applications across reboots. Other applications may connect directly. Finish/cancel macOS updating, then explicitly use End maintenance to restore protection.' ;;
+    os-update-end) printf '%s\n' 'Use after macOS updating has completed or been cancelled. Restores the original protection; networking may block until Surge and policy checks pass.' ;;
     restart|start) printf '%s\n' 'Connections may briefly reset. Protection remains armed. Waiting for the actual result; do not click repeatedly.' ;;
-    unlock) printf '%s\n' 'WARNING: this explicitly removes surge-guard protection until Start guard or next boot. Other PF anchors remain unchanged.' ;;
+    unlock) printf '%s\n' 'WARNING: this explicitly removes surge-guard protection until Start guard or next boot. An existing system-update maintenance request persists across reboot and needs End maintenance. Other PF anchors remain unchanged.' ;;
     rollback) printf '%s\n' 'Restores the previous binary, service and policy. An older version may have fewer protection checks. Connections may reset.' ;;
     restore-policy) printf '%s\n' 'Restores the policy saved before the last change. Its allowed routes may differ.' ;;
 esac
@@ -116,10 +137,14 @@ if [ "$action" = unlock ]; then
         printf '%s\n' 'Guard service is still loaded; refusing to clear rules.' >&2
         exit 1
     fi
-    sudo -n /sbin/pfctl -a "$label" -F rules
+    # Serialize the mutation with CLI management and the daemon's final block, including a concurrent Start.
+    sudo -n /usr/bin/lockf -k -t 20 /private/var/db/surge-guard/management.lock \
+        /usr/bin/lockf -k -t 20 /private/var/db/surge-guard/lock \
+        /sbin/pfctl -a "$label" -F rules
     rules=$(sudo -n /sbin/pfctl -a "$label" -sr)
     [ -z "$rules" ] || { printf '%s\n' 'ERROR: guard rules are still present.' >&2; exit 1; }
-    printf '%s\n' 'Verified: guard service stopped and its anchor empty. Protection is OFF. Use Start guard to re-arm.'
+    /usr/bin/logger -t surge-guard 'SurgeGuard manual_unlock: independent recovery verified the service absent and own anchor empty; protection off at verification; Start/End maintenance restores protection. Cached status is not live PF verification.'
+    printf '%s\n' 'Verified: guard service stopped and its anchor empty. Protection is OFF. Use End maintenance if a system-update request exists; otherwise use Start guard to re-arm.'
     exit 0
 fi
 if [ "$modern" -eq 1 ]; then exec sudo "$guard_bin" "$action"; fi

@@ -9,6 +9,7 @@ trap 'rm -rf "$launch_test_dir"' EXIT HUP INT TERM
 "$launch_test_dir/check"
 swift build -c release -Xswiftc -warnings-as-errors
 .build/debug/surge-guard-tests --gate-lock-check "$project_dir/.build/release/surge-gate"
+.build/debug/surge-guard-tests --diagnostic-lock-check "$project_dir/.build/release/surge-guard"
 if .build/release/surge-guard-launch --invalid; then
     printf '%s\n' 'Dedicated launcher accepted arbitrary arguments' >&2
     exit 1
@@ -22,6 +23,11 @@ fi
 .build/release/surge-guard validate examples/persistent-tcp.json
 .build/release/surge-guard --help
 .build/release/surge-guard install --help
+.build/release/surge-guard diagnose --help
+if .build/release/surge-guard diagnose --minutes 0 --json; then
+    printf '%s\n' 'Diagnostics accepted an invalid history window' >&2
+    exit 1
+fi
 .build/release/surge-gate --help
 printf '%s\n' '{"event":"gate_state","app":"","message":"1 application(s) pending"}' | .build/release/surge-guard format-logs | /usr/bin/grep -q '剩余 1 个应用'
 sh -n scripts/install-user.sh

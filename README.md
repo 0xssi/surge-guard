@@ -90,6 +90,9 @@ All six checks must pass: official signed Surge process, Surge's primary network
 service, connected extension, expected active VIF, IPv4 default route through
 that VIF, and no conflicting global IPv6 primary interface. Dynamic interface
 numbers are supported. Surge's identity/address are checked, not a VPN name.
+Only an explicit missing IPv6 store key means no global IPv6 route. Store errors,
+non-dictionary values and a present dictionary without a valid primary interface
+fail closed.
 
 For additional routing conditions, copy and edit a local policy:
 
@@ -128,6 +131,10 @@ Surge CLI rule evaluation does not make an HTTP request to the target. It checks
 the current rule decision, not real egress geography, residential-IP status or
 server reachability. Process/URL/protocol-specific rules can affect actual apps;
 this version evaluates the configured URL's default request context.
+Status and URL queries run concurrently within a bounded three-second helper
+budget. Results still expire three seconds after probe dispatch, including query
+time. Network events discard in-flight results from the previous generation
+while retaining an already completed result only until its original expiry.
 
 The selected group chain must be contiguous, acyclic and end at a recognized
 proxy type. Missing selections, unresolved group types and unknown final types
@@ -150,8 +157,8 @@ Surge VIF from its expected address; allow TCP sockets with Surge's dedicated
 effective group; reject all other non-loopback TCP, including IPv6. Both VIF and
 dedicated-group allow rules bind connection state to the interface.
 UDP is outside this opt-in's enforcement scope; it is not an all-protocol kill
-switch. IPv6 application TCP has no VIF exception in this
-version; Surge-owned IPv6 egress can match the group. There are no Tailscale,
+switch. IPv6 application TCP has no VIF exception; Surge-owned IPv6 egress can
+match the group. The local TCP opt-in below also covers Apple USB device links. There are no Tailscale,
 other-VPN or ordinary-user identity exceptions. LAN TCP is blocked by default;
 the explicit exception below is available. Failed readiness loads blocking rules
 and clears this Mac's old states, retaining only configured LAN TCP exceptions.
@@ -185,6 +192,16 @@ waits for actual exit, and starts the dedicated instance. Refused/timed-out
 quits remain errors; there is no forced termination or ordinary-identity
 fallback. Manual Enhanced Mode preferences are still respected. Without Gate,
 networking remains blocked until the dedicated launcher is used.
+
+Each dedicated launch is a request-specific, one-shot job in the console user's
+GUI launchd domain. The fixed launcher and Surge therefore have launchd as their
+parent, rather than Gate. This avoids exposing Gate's child relationship to VPN
+clients that classify DNS-port conflicts by parent PID; it cannot prevent an
+administrator or another privileged program from terminating Surge. The job has
+no restart policy and removes itself after exit. Its private staging plist stays
+outside `~/Library/LaunchAgents`, so it is not an independent login startup item.
+An already-running valid Surge is retained; deploying Gate does not retroactively
+change that process's parentage. The new path applies to the next dedicated launch.
 
 The fixed group remains the only Surge TCP egress identity across restarts and
 application updates. It is never learned from the current process or widened to
@@ -223,21 +240,38 @@ with the installed `configure` command and verify fresh status afterward.
 The exception permits incoming and outgoing **IPv4 TCP only** between this Mac's
 current private address on an up `enN` interface (Ethernet/Wi-Fi) and peers in
 `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16`. Rules bind the local address,
-interface and connection state. They do not grant VPN/bridge interfaces, IPv6,
-link-local, CGNAT or public addresses an exception. Remote private subnets may
+interface and connection state. They do not grant VPN/bridge interfaces, general
+IPv6, CGNAT or public addresses an exception. Remote private subnets may
 be reached through a LAN router; this is not limited to the directly attached
 subnet. IP forwarding by this Mac is not authorized by these rules.
 
+The same opt-in also permits **IPv6 link-local TCP on Apple USB NCM interfaces**
+for wired iPhone/iPad development. Native IOKit inventory identifies Apple's USB
+NCM driver and vendor; only up interfaces with actual `fe80::/10` local addresses
+qualify. Rules bind that interface, local address and connection state, and allow
+only `fe80::/10` peers. CoreDevice's second-stage `utunN` tunnel also permits TCP
+between its actual ULA address and its own ULA /64. The bounded system
+`remotectl dumpstate` inventory identifies CoreDevice interfaces; unrelated VPNs
+do not qualify. There is no Wi-Fi or public IPv6 exception. Interface
+names are discovered dynamically after reconnecting; enumeration failures revoke
+the exception. Adding a device tunnel preserves its existing USB carrier states;
+removal or other policy changes still block and clear old states. This does not
+add a general iCloud or Apple-service bypass.
+
 LAN TCP stays permitted when Surge or a configured route check is unready, so
 local administration can recover a blocked machine. Address/interface changes
-reload the rules and clear old states. Invalid configuration or failed interface
-inventory removes the exception and fails closed. Startup, updates and state
+reload the rules and clear corresponding old local-address/peer states. Optional
+USB inventory failure revokes USB exceptions while retaining verified LAN scope;
+LAN inventory failure similarly revokes its scope. These warnings appear in
+`local_tcp_errors` and the menu without invalidating a valid public-network
+policy. Failure of a required readiness/address probe still blocks globally.
+Invalid configuration removes both exceptions and fails closed. Startup, updates and state
 cleanup can briefly interrupt even LAN connections; this is not an independent
 out-of-band recovery path. The exception does not add blocked-state UDP DNS or
 mDNS access, so recovery may require a literal IP address.
 
 `status --json` exposes `snapshot.lan_tcp_enabled` and effective
-`lan_tcp_bindings`; the menu shows the same scope. A blocked status now describes
+`lan_tcp_bindings` and `usb_tcp_bindings`; the menu shows the same scope. A blocked status now describes
 traffic outside the configured exception. A permitted LAN peer could itself
 proxy traffic onward; do not treat this option as proof that every connection
 or application goes through Surge. Public TCP restrictions and all existing
@@ -329,20 +363,98 @@ its normal block operation before reporting the error, including when the old
 live anchor still permits traffic. A failed block is explicitly unverified.
 A disk attachment diagnostic is not evidence that
 live PF is blocking traffic. An unloaded/disabled guard is not restarted by a
-separate watcher; explicit `unlock` retains its start/next-boot semantics.
+separate watcher; outside system-update maintenance, explicit `unlock` retains
+its start/next-boot semantics.
 
-This is recovery in the normal installed OS, not a cross-reboot OS-update
-maintenance mode or a promise of update compatibility. System updates can need
-networking while the ordinary OS and Guard are running. `update-pause` pauses
-Gate's Surge relaunch only; it does not exempt macOS updates from PF. After an OS
-upgrade, verify fresh Guard/Gate status and the menu. Keep the early-boot limits.
+This attachment repair restores protection in the installed OS. It is separate
+from the explicit system-update maintenance mode below and is not a promise of
+compatibility with every installer environment. System updates can need networking
+while Guard is running; Gate's `update-pause` alone does not exempt them from PF.
+Old non-loopback addresses are retained in the private, boot-bound
+`/private/var/db/surge-guard/addresses.json` checkpoint (at most 512 addresses and
+64 KiB). A replacement daemon loads it before state cleanup. Failed enumeration
+or cleanup retains retry evidence; invalid history prevents verified protection
+and still attempts cleanup for currently enumerated addresses.
+
+### macOS system-update maintenance
+
+Upgrade **both Guard and Gate**, and install the independent recovery menu before
+using this mode. In SwiftBar choose **准备更新 macOS**, or run:
+
+```sh
+sudo /Library/PrivilegedHelperTools/surge-guard os-update-begin
+```
+
+This is an explicit administrator-authorized suspension of **all SurgeGuard
+network protection for all applications**, including across reboots. Applications
+may connect directly to the Internet; this is not an Apple-only exception. It does
+not quit Surge or guarantee network availability. Keep unrelated sensitive apps
+closed during maintenance. The menu stays orange and shows elapsed time.
+
+Preparation saves a private version/configuration backup, then waits for the
+current console user's upgraded Gate to acknowledge the exact request with fresh
+boot/process-bound status. Pending launches, unresolved launch recovery, queued
+or ongoing power requests, and old/stopped Gate prevent acknowledgement: resolve
+them and retry, or cancel using `os-update-end`. Protection is not released before
+acknowledgement. Once verified, Gate pauses automatic Surge launches, identity
+repairs, application restoration and periodic session checkpoints. Its separate
+Surge `update-pause` setting and saved application session are retained.
+
+Only this tool's disk anchor and live rules are cleared. Other PF anchors, NAT,
+global PF enablement and policy configuration are retained. The daemon continues
+to verify its own rules are empty, including after restart; `status --json`
+reports `maintenance`, not `allowed`/`blocked`, and never claims active protection.
+Maintenance snapshots use version 2 so old readers show unverified status instead
+of falsely reporting blocking; normal protection snapshots remain version 1.
+The root-owned `/Library/Application Support/SurgeGuard/system-update.json`
+records `preparing`, `active` or `restoring`. A saved request alone does not prove
+that PF release or restoration succeeded. Wait for **VERIFIED MAINTENANCE** before
+starting the update through macOS's own controls. Do not use Gate's ordered power
+actions for the system installer.
+
+Maintenance **does not expire automatically**, regardless of elapsed time, daemon
+restarts or reboots. After the OS update completes or is cancelled, choose
+**结束维护并恢复保护**, or run:
+
+```sh
+sudo /Library/PrivilegedHelperTools/surge-guard os-update-end
+/Library/PrivilegedHelperTools/surge-guard status --json
+```
+
+Ending also cancels an unfinished preparation. It restores the blocking boot
+anchor, repairs a missing supported PF attachment if necessary, clears old states
+and waits for fresh verified normal protection before removing the checkpoint
+and allowing Gate to resume. `blocked` is a successful protection restoration,
+not successful networking; Surge and all original policy checks must still pass.
+An original Surge update pause remains paused and requires its own explicit
+`update-resume`. Connections may reset while protection is restored.
+
+On error, retain the checkpoint and retry the same command; never delete it to
+force a success. During preparation/active maintenance retry `os-update-begin` or
+end/cancel; once restoration starts, retry `os-update-end`. Ordinary Guard
+start/restart/install/configuration/rollback actions are refused while the
+checkpoint exists. Status, logs and the independent emergency rule-removal action
+remain available offline. Emergency removal does not clear the maintenance
+checkpoint: use `os-update-end` afterward, even after a reboot. A broken menu
+renderer retains an End maintenance entry; a broken privileged binary still has
+the independent emergency rule-removal path.
+If the maintenance checkpoint is corrupt, startup and `os-update-end` attempt
+normal boot-anchor restoration, supported attachment repair and blocking before
+reporting the original error. The corrupt record is retained for administrator
+repair; successful blocking does not mean maintenance ended. Explicit CLI
+`unlock` remains available even with a pending or unreadable checkpoint.
+
+After the update, verify fresh Guard/Gate status and SwiftBar login startup. Unit
+checks do not prove update installation, firmware/personalization, recovery-OS
+compatibility or early-boot coverage; see the authorized live acceptance cases.
 
 The menu provides normal restart with result verification, Start/re-arm, Backup,
 Restore previous version/config, Restore previous policy, and Emergency remove
 block. Privileged actions open Terminal and explain the impact before requesting
 sudo. Emergency recovery waits for the previous PID to exit and clears only this
 guard's anchor; it never disables PF globally. It explicitly turns protection off
-until Start or next boot. A forced `kickstart -k` is not a normal restart path.
+until Start or next boot outside system-update maintenance; during maintenance,
+explicit End is required. A forced `kickstart -k` is not a normal restart path.
 
 Update/manual backups live in `/private/var/db/surge-guard/backups/<id>` with root-only
 access. Each `configure` separately saves the prior policy. Backups are retained;
@@ -407,11 +519,14 @@ errors are red. The SwiftBar display names are `surge-guard` and `surge-gate`.
 
 ### Updating Surge
 
-Use **Prepare Surge update / 准备更新 Surge** and wait for acknowledgement before
+Use **Prepare Surge update / 准备升级 Surge（暂停自动恢复，保留 PF 保护）** and wait for acknowledgement before
 starting the official updater. Gate then pauses automatic Surge startup, identity
 repair and application restoration. It does not quit the current Surge, change
 PF, stop Guard or grant the updater networking exceptions. Finish/cancel the
-official update before choosing **Resume automatic startup / 恢复自动启动**.
+official update before choosing **Finish update and resume / 升级结束并恢复 Surge**.
+These actions appear before the power controls. A failed pause/resume never
+prints acknowledgement. Resuming automatic operations does not claim that
+Enhanced Mode or PF verification has already recovered; inspect the menu status.
 Download the complete installer while Surge works if the updater needs networking
 after quitting it. A stalled updater is not automatically killed or treated as
 finished; logs remain available and the pause has no automatic expiry.
@@ -421,12 +536,16 @@ Invalid/unreadable update state also suspends automatic actions. A matching
 request ID and fresh service status are required for acknowledgement; a timeout
 retains the request and reports failure, not permission to start updating.
 An operation already in progress must settle before the pause is acknowledged.
-A launch timeout does not cancel an NSWorkspace request or the dedicated launcher.
-`pending-launch.json` records the observing Gate instance and, for the dedicated
-launcher, its PID and process birth time. After Gate restarts, verified app startup
-settles the request; a recorded launcher that has exited (including a reused PID)
-allows recovery after a 30-second failure backoff. A live launcher or callback
-keeps the pause unacknowledged.
+A launch timeout does not cancel an NSWorkspace request or a launchd submission.
+`pending-launch.json` records the observing Gate instance, the launchctl submission
+PID/birth time separately from the actual launcher/Surge PID/birth time, and the
+request-specific job identity. A queued job, living submission, living unverified
+launcher or callback keeps the pause unacknowledged. After Gate restarts, only the
+recorded job process's verified Surge startup settles a dedicated request; a
+finished submission alone never does. When the job is absent and the recorded
+submission/child is proven gone (including PID reuse), failure recovery waits
+30 seconds. Old direct-child launch records remain readable. Do not downgrade
+Gate while a launch request is unresolved.
 
 If Gate crashes before recording the child identity, or loses an NSWorkspace
 callback, an absent application alone cannot establish cancellation. Gate reports
@@ -499,6 +618,17 @@ cannot stop other login items from starting; the system firewall gate is what
 blocks their traffic until conditions pass. SurgeGate starts Surge, but does not
 silently change its Enhanced Mode preference or routing choices.
 
+Before a new Surge launch, Gate waits for macOS to publish a primary IPv4 network
+with an up, non-loopback IPv4 interface. A DHCP address alone is insufficient:
+at login, captive-network evaluation can temporarily withhold the primary
+network and cause NetworkExtension startup to fail with `No network available`.
+`waiting_network` means startup is deferred; Gate rechecks on its normal loop,
+without a fixed delay, an Internet probe or a launch-failure cooldown. Pause and
+ordered shutdown remain responsive. A running valid Surge is retained, and Gate
+does not force Enhanced Mode on or restart it merely because readiness is blocked.
+This startup prerequisite does not authorize PF permission or app restoration;
+all existing verified daemon checks still apply.
+
 Legacy original files are retained. The old `com.user.surgegate` login task is
 unloaded, and its plist is renamed to `.migrated-backup`. Unknown legacy app names
 are logged for manual conversion. Keep the old files until migration is verified.
@@ -536,6 +666,7 @@ A request still in the quitting phase cannot be queued again.
 | `surge-guard check --json` | Normal user; fresh conditions; exit 0 ready, 1 not ready/error |
 | `surge-guard status --json` | Normal user; recent daemon/PF snapshot; exit 0 if report produced |
 | `surge-guard doctor` | Normal user summary; sudo adds live PF inspection |
+| `surge-guard diagnose [--minutes 1...120] [--watch-seconds 1...300] [--json]` | Normal user; default 20-minute merged evidence, optional short DNS/QUIC observation and private report |
 | `surge-guard observe-egress [--json]` | Read-only socket/interface activity sample; sudo can improve process visibility |
 | `surge-guard validate FILE` | Normal user; syntax/semantic validation only |
 | `sudo surge-guard configure FILE` | Validate then atomically install policy; daemon reloads automatically |
@@ -546,15 +677,64 @@ A request still in the quitting phase cannot be queued again.
 | `sudo surge-guard rollback` | Restore the last update/manual backup, restart and verify |
 | `sudo surge-guard restore-policy` | Restore the policy saved before the last configure |
 | `sudo surge-guard unlock` | Remove this gate temporarily; start/reboot re-arms it |
+| `sudo /Library/PrivilegedHelperTools/surge-guard os-update-begin` | Suspend all-application protection across reboots after Gate acknowledgement |
+| `sudo /Library/PrivilegedHelperTools/surge-guard os-update-end` | Finish/cancel system maintenance; verify normal PF before Gate resumes |
 | `surge-gate status [--json]` | Normal user; companion state, pending apps and freshness |
 | `surge-gate start` / `stop` / `restart` | Normal user; start, stop (without changing PF) or restart companion |
 | `surge-gate update-pause` / `update-resume` | Normal user; pause/resume automatic Surge relaunch during manual quits or updates |
 | `surge-gate logs` / `edit-config` | Normal user companion logs and bundle-ID config |
 
+The user menu provides **合并检查最近 20 分钟** and **120 秒 DNS／QUIC 诊断**.
+They use the installed user renderer, independently of the guard executable:
+
+```sh
+"$HOME/Library/Application Support/SurgeGuard/bin/surge-guard-ui" diagnose
+"$HOME/Library/Application Support/SurgeGuard/bin/surge-guard-ui" diagnose --minutes 20 --watch-seconds 120 --json
+```
+
+Run these as the normal user. The menu requests sudo authentication only for
+fixed private event-file reads; cancellation still produces a partial report.
+Direct CLI use never prompts: an existing sudo credential may allow those reads,
+otherwise the report records them as unavailable. User-owned collection and
+formatting code never runs as root. No PF, DNS, app, service or recorder setting
+is changed, and no remote connectivity test is performed.
+
+Reports combine current Guard/Gate/Surge/recorder snapshots, both retained Guard
+and Gate event files, and tails of up to four Surge logs. Each input is bounded
+to 1 MiB (Surge file tails to 512 KiB). A short observation polls at most 2,000
+Surge memory-log lines every two seconds, retaining only DNS/QUIC/socket context.
+It stops after the requested monotonic duration, at most 300 seconds. The report
+retains at most 1,500 newest entries with a 2 MiB evidence budget and a 6 MiB
+serialized limit. Human output shows the last 80 retained entries.
+Initial/final status collection takes additional bounded command time. A writer
+lock refuses overlapping diagnostic runs before either can replace the report.
+
+The report and one predecessor are private `0600` files at
+`~/Library/Application Support/SurgeGuard/diagnostic-report.json` and `.json.1`.
+During observation, ten-second checkpoints preserve the previous *session's*
+report; interruption may lose the last interval. Reports may contain local
+addresses, process paths and domains. Checkpoints have `collection_finished: false`;
+normal completion sets it true without claiming complete historical coverage.
+Do not publish or commit them. Permissions,
+malformed/undated records, input tails, non-overlapping memory windows, observed
+time ranges and capacity omissions are explicit. Retained timestamps do not
+prove continuous coverage. JSON preserves the original structured event fields.
+`root_cause` remains `not_determined` and `no_bypass_verified` remains false;
+absent warnings or a successful status read do not establish network health.
+For packet evidence, separately opt into the existing recorder described in
+[packet-audit.md](docs/packet-audit.md); short diagnostics never enable it.
+
+Only the user menu/renderer need updating for these diagnostic and presentation
+changes: `scripts/install-user.sh --menu-only`. This does not replace or restart
+Guard, Gate or Surge. Older menu renderers do not provide these commands.
+
 JSON uses snake_case. `check` includes `version`, `ready`, `mode`, `readiness`,
 `reasons` and optional `session`. `status` includes `state`, `daemon_running`,
-`reason` and optional `snapshot`. Inspect `state`, not the exit code alone.
-States are `allowed`, `blocked`, `unlocked`, `stopped` and `unknown`.
+`reason`, optional `snapshot` and optional `system_update`. Inspect `state`, not
+the exit code alone. States are `allowed`, `blocked`, `unlocked`, `stopped`,
+`unknown` and `maintenance`. Only the last state verifies explicit suspension,
+not protection. Ordinary management commands in this table are refused while
+system-update maintenance exists; use End or the independent emergency menu.
 
 Snapshots are root-owned, tied to the current boot/PID, and expire after eight
 seconds without both status and PF audit freshness. Routing results expire after
@@ -589,12 +769,15 @@ A status-file read failure pauses application restoration; it does not by itself
 establish an Internet outage. State files receive their final permissions before
 atomic publication, preventing a transient private-file permission window.
 
-Gate records `surge_child_started` and `surge_child_exited` for dedicated-launcher
-children it starts. Exit records retain the launch ID, child PID/native birth time
-when available, whether Gate verified that child's Surge startup, exit code or
-uncaught signal, and callback wall/monotonic time. An early launcher failure is
-not labeled a verified Surge exit; missing birth time is explicit. Gate events
-also include a run ID and millisecond timestamps. `surge_quit_requested` records
+Gate records `surge_job_submitted`, `surge_job_process_observed` and
+`surge_job_process_exited` for one-shot dedicated launch jobs. Records retain the
+launch ID, actual process PID/native birth time, startup verification and callback
+wall/monotonic time. Gate is no longer the parent: it can observe exit but cannot
+obtain that process's exit code, signal or sender. The launchctl submission's
+completion is not a Surge exit. Historical `surge_child_started`/`surge_child_exited`
+records from direct launches still render their original exit codes/signals.
+An early launcher failure is not labeled a verified Surge exit. Gate events also
+include a run ID and millisecond timestamps. `surge_quit_requested` records
 Gate's identity-repair or ordered shutdown/restart intent before a normal quit;
 `surge_quit_result` records request acceptance, not confirmed exit.
 
@@ -602,9 +785,10 @@ These records use the existing private rotating Gate log (`surge-gate logs --jso
 An exit code of zero does not establish a user-requested quit, and a signal does
 not identify its sender. Callback time is not the exact exit time or a network
 protection measurement. `surge_exit_observation_scope` records the coverage limit:
-existing Surge processes, NSWorkspace launches and exits after Gate stops have
-no child exit-status coverage. Updating source/menu files alone does not enable
-this in the running service; deploy the Gate binary in a maintenance window.
+existing Surge processes without a pending job record, NSWorkspace launches and
+exits after Gate stops are not covered by this observer. Updating source/menu
+files alone does not change the running service; deploy the Gate binary and
+verify the next dedicated startup in a maintenance window.
 
 SwiftBar's recent/follow system-log actions use fixed privileged `tail` reads and
 an unprivileged user renderer. This also formats historical logs without running
@@ -751,7 +935,10 @@ as your normal user in a local Terminal:
 
 It authenticates only fixed system commands, validates the service state/PID,
 waits for the old process to exit, confirms the job is absent, then clears only
-this anchor and verifies it is empty. `bootout` returning alone does not establish
+this anchor under the management/runtime locks and verifies it is empty. It
+records the result in the macOS system log without invoking the Guard executable.
+Its independent path does not publish the CLI's unlocked marker; stopped/unknown
+cached menu state is not live PF verification. `bootout` returning alone does not establish
 process exit. Query failures abort recovery. Never globally disable PF or flush
 another service's rules to recover this utility.
 
@@ -760,6 +947,8 @@ another service's rules to recover this utility.
 - Blocked mode permits loopback and narrow DHCP/IPv6 link configuration; normal
   Internet/LAN traffic and DNS are blocked, except the explicit private LAN TCP
   option above. This is not zero packets on the link.
+  DHCPv4 unicast renewal is limited to root-owned UDP sockets from a local
+  address/port 68 to server port 67; it does not permit ordinary DNS or UDP.
 - Default allowed mode clears this guard's anchor and preserves Surge policies, including
   DIRECT. It does not independently exclude physical-interface binding, alternate
   VPNs or Surge exclusions. Default-route readiness is not an unbypassable tunnel.

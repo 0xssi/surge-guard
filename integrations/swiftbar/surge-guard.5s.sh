@@ -11,4 +11,5 @@ if [ "${1:-}" != --section ]; then printf '%s\n' '🟠 | size=13' '---'; fi
 printf '%s\n' 'surge-guard · 🟠 状态不可用' \
     "-- 应急解除阻断（关闭保护） | bash=\"$user_bin/surge-guard-action\" param1=unlock terminal=true refresh=true" \
     "-- 重启守护并等待验证 | bash=\"$user_bin/surge-guard-action\" param1=restart terminal=true refresh=true" \
+    "-- 结束系统更新维护并恢复保护 | bash=\"$user_bin/surge-guard-action\" param1=os-update-end terminal=true refresh=true" \
     "-- 查看最近日志 | bash=\"$user_bin/surge-guard-action\" param1=logs terminal=true"

@@ -1,5 +1,23 @@
 import Darwin
 
+public struct LocalTCPInventory {
+    public private(set) var lan: [LANTCPBinding] = []
+    public private(set) var usb: [USBTCPBinding] = []
+    public private(set) var errors: [String] = []
+
+    public init(addresses: () throws -> [InterfaceAddress] = { try Probe.addresses() },
+                lan: ([InterfaceAddress]) throws -> [LANTCPBinding] = LANTCP.bindings,
+                usb: ([InterfaceAddress]) throws -> [USBTCPBinding] = USBTCP.bindings) {
+        let current: [InterfaceAddress]
+        do { current = try addresses() }
+        catch { errors = ["interface_inventory_failed: \(error)"]; return }
+        do { self.lan = try lan(current) }
+        catch { errors.append("lan_tcp_inventory_failed: \(error)") }
+        do { self.usb = try usb(current) }
+        catch { errors.append("usb_tcp_inventory_failed: \(error)") }
+    }
+}
+
 public struct LANTCPBinding: Codable, Equatable, Hashable {
     public let interface: String
     public let address: String

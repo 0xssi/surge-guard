@@ -180,4 +180,30 @@ public struct SessionObservation: Codable {
     public var enhancedMode: Bool
     public var routes: [RouteResult]
     public var ready: Bool { mode == "rule" && enhancedMode && !routes.isEmpty && routes.allSatisfy(\.ready) }
+
+    public static func collect(configuration: Configuration, query: ([String]) throws -> String) throws -> SessionObservation {
+        try configuration.validate()
+        let arguments = [["--raw", "status"]] + configuration.routeChecks.map { ["--raw", "rule", "explain", $0.url] }
+        let lock = NSLock()
+        var responses = [Result<String, Error>?](repeating: nil, count: arguments.count)
+        // Independent CLI reads share one freshness budget rather than accumulating per-URL timeouts.
+        DispatchQueue.concurrentPerform(iterations: arguments.count) { index in
+            let result = Result { try query(arguments[index]) }
+            lock.lock(); responses[index] = result; lock.unlock()
+        }
+        let status = try responses[0]!.get()
+        guard let object = try JSONSerialization.jsonObject(with: Data(status.utf8)) as? [String: Any],
+              let mode = object["mode"] as? String,
+              let features = object["features"] as? [String: Any],
+              let enhanced = features["enhanced-mode"] as? Bool else {
+            throw GuardError("Surge returned incomplete mode/feature status")
+        }
+        var routes: [RouteResult] = []
+        for (index, check) in configuration.routeChecks.enumerated() {
+            // shortcut: URL default context only; add request overrides when gating process/protocol-specific rules.
+            let response = try responses[index + 1]!.get()
+            routes.append(try RouteResult.evaluate(Data(response.utf8), check: check))
+        }
+        return SessionObservation(policyFingerprint: try configuration.fingerprint(), mode: mode, enhancedMode: enhanced, routes: routes)
+    }
 }

@@ -167,6 +167,7 @@ func queueShutdown(_ action: String) throws {
     let fd = try lock("request.lock")
     do {
         defer { close(fd) }
+        try SystemUpdate.requireNormalOperation()
         let report = try readStatus()
         let quitting = report.servicePID == report.status.pid && report.status.bootId == SystemClock.bootID && report.status.state == "shutting_down"
         try GateShutdownRequest.validate(paused: GateUpdate.load()?.paused == true, pendingLaunch: GatePendingLaunch.load(),
@@ -189,7 +190,7 @@ func recoverLaunch(_ id: UUID) throws {
     let fd = try lock("request.lock", timeout: 2)
     defer { close(fd) }
     let report = try readStatus()
-    guard report.fresh, report.status.state == "launch_recovery_required", report.status.pendingLaunch?.id == id,
+    guard report.fresh, ["launch_recovery_required", "os_update_waiting"].contains(report.status.state), report.status.pendingLaunch?.id == id,
           let observer = report.status.runId else { throw GuardError("Inspect fresh Gate status for the exact orphaned launch ID") }
     try GatePendingLaunch.recover(id: id, observer: observer)
     event("launch_recovery_confirmed", "User confirmed the orphaned launch finished, failed or was cancelled; Gate may resume", details: ["request_id": id.uuidString])

@@ -192,8 +192,12 @@ enum Admin {
     }
 
     static func start() throws {
-        if try loaded() {
-            print("Service is already loaded. Verify with sudo \(Paths.binary) status")
+        let service = try Command.run("/bin/launchctl", ["print", "system/" + Paths.label])
+        if try StatusReport.serviceLoaded(service) {
+            if try !StatusReport.serviceRunning(service) {
+                try Command.checked("/bin/launchctl", ["kickstart", "system/" + Paths.label])
+            }
+            print("Service is loaded; start requested if stopped. Verify with sudo \(Paths.binary) status")
             return
         }
         try RootFiles.verify(Paths.binary)
@@ -202,7 +206,7 @@ enum Admin {
         do {
             let lock = try RuntimeLock(timeout: 20)
             defer { withExtendedLifetime(lock) {} }
-            try Firewall().prepareAttachment()
+            if try SystemUpdate.load()?.phase != .active { try Firewall().prepareAttachment() }
             if FileManager.default.fileExists(atPath: Paths.unlockMarker) {
                 try RootFiles.verify(Paths.unlockMarker)
                 try FileManager.default.removeItem(atPath: Paths.unlockMarker)

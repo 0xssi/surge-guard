@@ -32,19 +32,35 @@ var workspaceLaunches = Set<UUID>()
 let gateRunID = UUID()
 
 func pendingLaunchState() throws -> (request: GatePendingLaunch, disposition: GatePendingLaunch.Disposition)? {
-    guard let request = try GatePendingLaunch.load() else { return nil }
+    guard var request = try GatePendingLaunch.load() else { return nil }
     if workspaceLaunches.contains(request.id) { return (request, .inFlight) }
+    if request.launchd == true {
+        let job = try GateLaunchJob.state(request.id)
+        if case .running(let pid) = job, let child = try SurgeProcess.read(pid: pid) {
+            guard request.child == nil || request.child == child else { throw GuardError("Launchd job process identity changed") }
+            if request.child == nil {
+                request.child = child
+                try request.save(requireExisting: true)
+            }
+            try observeSurgeJob(request, child: child)
+        }
+        let child = try request.child.flatMap { try SurgeProcess.read(pid: $0.pid) }
+        let identity = surgeIdentity()
+        let verified = identity.verified && identity.pid == child?.pid ? child : nil
+        if let verified { surgeExitObserver?.verifiedStartup(matching: verified) }
+        let submissionRunning: Bool?
+        if let submission = request.submission {
+            submissionRunning = try SurgeProcess.read(pid: submission.pid) == submission
+        } else if request.observer == gateRunID, surgeSubmission?.id == request.id {
+            submissionRunning = surgeSubmission?.task.isRunning
+        } else { submissionRunning = nil }
+        return (request, request.launchdDisposition(job: job, submissionRunning: submissionRunning,
+                                                    verifiedApp: verified, childIdentity: child))
+    }
     let appRunning: Bool
     if request.app == "com.nssurge.surge-mac" {
         let identity = surgeIdentity()
         appRunning = identity.pid != nil && (identity.verified || identity.reason == "dedicated_group_not_required")
-        if appRunning { recordVerifiedSurgeChild(pid: identity.pid) }
-        if !appRunning, request.observer == gateRunID, let task = surgeLaunchProcess, !task.isRunning {
-            return (request, .failed)
-        }
-        if !appRunning, request.observer == gateRunID, request.child == nil, surgeLaunchProcess?.isRunning == true {
-            return (request, .inFlight)
-        }
     } else {
         appRunning = NSRunningApplication.runningApplications(withBundleIdentifier: request.app).contains(where: { !$0.isTerminated })
     }
@@ -54,6 +70,7 @@ func pendingLaunchState() throws -> (request: GatePendingLaunch, disposition: Ga
 }
 
 @discardableResult func launch(_ id: String) throws -> Bool {
+    try SystemUpdate.requireNormalOperation()
     if NSRunningApplication.runningApplications(withBundleIdentifier: id).contains(where: { !$0.isTerminated }) { return false }
     guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { throw GuardError("Application is not installed") }
     let config = NSWorkspace.OpenConfiguration()
@@ -78,14 +95,24 @@ func pendingLaunchState() throws -> (request: GatePendingLaunch, disposition: Ga
     return true
 }
 
-var surgeLaunchProcess: Process?
+var surgeSubmission: (id: UUID, task: Process)?
 var surgeExitObserver: GateChildExitObserver?
-enum SurgeLaunchResult { case unchanged, launched, waitingForBlock, updatePaused }
+var surgeObservedChild: (id: UUID, child: SurgeProcess)?
+enum SurgeLaunchResult { case unchanged, launched, waitingForBlock, waitingForNetwork, updatePaused }
 
-func recordVerifiedSurgeChild(pid: pid_t?) {
-    guard let pid, let task = surgeLaunchProcess, task.processIdentifier == pid, task.isRunning,
-          let identity = try? SurgeProcess.read(pid: pid) else { return }
-    surgeExitObserver?.verifiedStartup(matching: identity)
+func observeSurgeJob(_ request: GatePendingLaunch, child: SurgeProcess) throws {
+    if surgeObservedChild?.id == request.id, surgeObservedChild?.child == child { return }
+    let observer = GateChildExitObserver(launchID: request.id)
+    try observer.attachToLaunchdProcess(child) { details in
+        event("surge_job_process_exited", "Launchd-owned launcher/Surge exited; exit status and sender are unavailable to Gate",
+              level: "warning", details: details)
+    }
+    surgeExitObserver = observer
+    surgeObservedChild = (request.id, child)
+    event("surge_job_process_observed", "Launchd owns the dedicated launcher; Surge startup is not yet verified",
+          details: ["launch_id": request.id.uuidString, "job_label": GateLaunchJob.label(request.id),
+                    "child_pid": child.pid, "child_started_seconds": child.startedSeconds,
+                    "child_started_microseconds": child.startedMicroseconds, "process_relationship": "launchd_child"])
 }
 
 func requestSurgeQuit(_ app: NSRunningApplication, reason: String) -> Bool {
@@ -123,9 +150,14 @@ func surgeIdentity() -> GateSurgeIdentity {
 }
 
 func ensureSurge(quitTimeout: Double) throws -> SurgeLaunchResult {
+    if try SystemUpdate.load() != nil { return .updatePaused }
     if try GateUpdate.load()?.paused == true { return .updatePaused }
     let policy = try Configuration.load()
-    guard policy.usesPersistentTCP else { return try launch("com.nssurge.surge-mac") ? .launched : .unchanged }
+    guard policy.usesPersistentTCP else {
+        if NSRunningApplication.runningApplications(withBundleIdentifier: "com.nssurge.surge-mac").contains(where: { !$0.isTerminated }) { return .unchanged }
+        guard try Probe.startupNetworkReady() else { return .waitingForNetwork }
+        return try launch("com.nssurge.surge-mac") ? .launched : .unchanged
+    }
     let group = try DedicatedEgress.group()
     let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.nssurge.surge-mac").filter { !$0.isTerminated }
     if let pid = try Probe.trustedSurgePID(), (apps.isEmpty || (apps.count == 1 && apps[0].processIdentifier == pid)),
@@ -134,7 +166,7 @@ func ensureSurge(quitTimeout: Double) throws -> SurgeLaunchResult {
         guard StatusReport.read().state == "blocked" else {
             return .waitingForBlock
         }
-        if try GateUpdate.load()?.paused == true { return .updatePaused }
+        if try SystemUpdate.load() != nil || GateUpdate.load()?.paused == true { return .updatePaused }
         for app in apps {
             guard requestSurgeQuit(app, reason: "identity_repair") else { throw GuardError("Surge declined normal quit; dedicated launch cancelled") }
         }
@@ -144,46 +176,38 @@ func ensureSurge(quitTimeout: Double) throws -> SurgeLaunchResult {
         }
         guard apps.allSatisfy(\.isTerminated) else { throw GuardError("Surge did not finish normal quit; no forced termination") }
     }
-    if try GateUpdate.load()?.paused == true { return .updatePaused }
-    if surgeLaunchProcess?.isRunning == true { return .unchanged }
+    if try SystemUpdate.load() != nil || GateUpdate.load()?.paused == true { return .updatePaused }
+    guard try GatePendingLaunch.load() == nil else { return .unchanged }
+    guard try Probe.startupNetworkReady() else { return .waitingForNetwork }
+    var request = GatePendingLaunch(app: "com.nssurge.surge-mac", observer: gateRunID)
+    request.launchd = true
+    let data = try PropertyListSerialization.data(fromPropertyList: GateLaunchJob.plist(request.id), format: .xml, options: 0)
+    try UserPaths.write(String(decoding: data, as: UTF8.self), to: GateLaunchJob.plistPath)
+    try request.save()
     let task = Process()
-    task.executableURL = URL(fileURLWithPath: DedicatedEgress.launcher)
+    task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    task.arguments = ["bootstrap", "gui/\(getuid())", GateLaunchJob.plistPath]
     task.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
     task.standardInput = FileHandle.nullDevice
     task.standardOutput = FileHandle.nullDevice
     task.standardError = FileHandle.nullDevice
-    var request = GatePendingLaunch(app: "com.nssurge.surge-mac", observer: gateRunID)
-    try request.save()
-    let exitObserver = GateChildExitObserver(launchID: request.id)
-    exitObserver.attach(to: task) { details in
-        event("surge_child_exited", "Dedicated launcher child exited; termination sender is unknown",
-              level: "warning", details: details)
-    }
     do { try task.run() }
     catch { try request.complete(); throw error }
-    surgeLaunchProcess = task
-    surgeExitObserver = exitObserver
-    request.child = try SurgeProcess.read(pid: task.processIdentifier)
-    exitObserver.recordIdentity(request.child)
-    var launchDetails: [String: Any] = ["launch_id": request.id.uuidString, "child_pid": task.processIdentifier,
-                                       "birth_time_available": request.child != nil]
-    if let child = request.child {
-        launchDetails["child_started_seconds"] = child.startedSeconds
-        launchDetails["child_started_microseconds"] = child.startedMicroseconds
-    }
-    event("surge_child_started", "Dedicated launcher started; Surge startup is not yet verified", details: launchDetails)
-    if request.child != nil { try request.save() }
+    surgeSubmission = (request.id, task)
+    request.submission = try SurgeProcess.read(pid: task.processIdentifier)
+    if request.submission != nil { try request.save(requireExisting: true) }
+    event("surge_job_submitted", "Submitted a one-shot GUI launchd job; submission is not verified Surge startup",
+          details: ["launch_id": request.id.uuidString, "job_label": GateLaunchJob.label(request.id),
+                    "submission_pid": task.processIdentifier, "submission_birth_time_available": request.submission != nil])
     let deadline = SystemClock.seconds + 10
     while SystemClock.seconds < deadline {
-        if let pid = try Probe.trustedSurgePID(),
-           try DedicatedEgress.identityMatches(pid: pid, uid: getuid(), group: group) {
-            recordVerifiedSurgeChild(pid: pid)
-            try request.complete()
-            return .launched
-        }
-        guard task.isRunning else {
-            try request.complete()
-            throw GuardError("Dedicated Surge launcher exited with status \(task.terminationStatus)")
+        if let state = try pendingLaunchState() {
+            if state.disposition == .settled { try state.request.complete(); return .launched }
+            if state.disposition == .failed {
+                try state.request.complete()
+                let status = task.isRunning ? "unavailable" : String(task.terminationStatus)
+                throw GuardError("One-shot Surge job exited without verified startup (launchctl status \(status))")
+            }
         }
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
     }
@@ -198,16 +222,17 @@ struct GateStatus: Codable {
     var update: GateUpdate?
     var pendingLaunch: GatePendingLaunch?
     var runId: UUID? = gateRunID
-    var capabilities = ["update_pause_v1", "launch_recovery_v1"]
+    var capabilities = ["update_pause_v1", "launch_recovery_v1", "os_update_v1"]
+    var systemUpdateId: UUID?
     var bootId = SystemClock.bootID
     var checkedUptime = SystemClock.seconds
     var pid = getpid()
 }
 
 func publish(_ state: String, _ message: String, pending: [String], surge: GateSurgeIdentity? = nil, update: GateUpdate? = nil,
-             pendingLaunch: GatePendingLaunch? = nil) throws {
+             pendingLaunch: GatePendingLaunch? = nil, systemUpdateId: UUID? = nil) throws {
     try UserPaths.write(try JSON.encode(GateStatus(state: state, message: message, pending: pending, surge: surge, update: update,
-                                                 pendingLaunch: pendingLaunch)), to: UserPaths.status)
+                                                 pendingLaunch: pendingLaunch, systemUpdateId: systemUpdateId)), to: UserPaths.status)
 }
 
 func readStatus() throws -> (status: GateStatus, running: Bool, fresh: Bool, servicePID: Int32?) {
@@ -232,6 +257,7 @@ func updateMode(paused: Bool) throws {
     let update = GateUpdate(paused: paused)
     do {
         defer { close(fd) }
+        try SystemUpdate.requireNormalOperation()
         let previous = try readStatus()
         guard previous.fresh, !["shutting_down", "shutdown_requested"].contains(previous.status.state),
               try GateShutdownRequest.load() == nil else {
@@ -266,6 +292,7 @@ func saveSession(_ config: GateConfiguration, pending: [String], preserveSavedAp
 let shutdownPath = GateShutdownRequest.path
 
 func shutdown(_ action: String, config: GateConfiguration, pending: [String], preserveSavedApps: Bool = false) throws {
+    try SystemUpdate.requireNormalOperation()
     guard ["restart", "shutdown"].contains(action) else { throw GuardError("Invalid shutdown action") }
     guard ["allowed", "blocked"].contains(StatusReport.read().state) else {
         throw GuardError("System guard state is not verified; no applications were asked to quit")
@@ -320,8 +347,10 @@ func run() throws {
     var acknowledgedPause: UUID?
     var shutdownPhase = GateShutdownPhase.idle
     var shutdownFailure: String?
+    var lastMaintenanceID: UUID?
     event("gate_started", "Waiting for fresh verified system guard status")
-    event("surge_exit_observation_scope", "Exit status is recorded only for dedicated launcher children started by this Gate run. Existing Surge processes, NSWorkspace launches and exits after Gate stops are not covered.")
+    event("surge_exit_observation_scope", "One-shot launchd process exits are observed without exit codes/signals. Existing Surge processes without a pending job, NSWorkspace launches and exits after Gate stops are not covered.",
+          details: ["launch_method": "launchd_once", "exit_status_available": false])
     while true {
         do {
             let config = try GateConfiguration.load()
@@ -349,12 +378,17 @@ func run() throws {
             // Submission and consumption share a short lock; command waiters do not hold it.
             let requestLock = try lock("request.lock")
             var request: GateShutdownRequest?
+            var maintenance: SystemUpdate?
+            var maintenanceSettled = false
             let preserve = shutdownPhase.preservesSession
             do {
                 defer { close(requestLock) }
                 // Recovery may have cleared the observed marker before we obtained this lock.
                 guard try GatePendingLaunch.observationIsCurrent(launchState?.request) else { continue }
-                request = try GateShutdownRequest.load()
+                maintenance = try SystemUpdate.load()
+                let queuedRequest = try GateShutdownRequest.load()
+                maintenanceSettled = launchState == nil && queuedRequest == nil && shutdownPhase == .idle
+                request = maintenance == nil ? queuedRequest : nil
                 if let queued = request {
                     try queued.withdraw()
                     do {
@@ -368,6 +402,22 @@ func run() throws {
                     }
                 }
             }
+            if let maintenance {
+                if maintenanceSettled, lastMaintenanceID != maintenance.id {
+                    if maintenance.phase == .preparing { try saveSession(config, pending: pending, preserveSavedApps: true) }
+                    event("system_update_paused", "System update maintenance suspends automatic launches and session checkpoints; Surge update preference is unchanged",
+                          details: ["request_id": maintenance.id.uuidString])
+                    lastMaintenanceID = maintenance.id
+                }
+                try publish(maintenanceSettled ? "os_update_paused" : "os_update_waiting",
+                            maintenanceSettled ? "macOS maintenance; finish or cancel updating, then explicitly restore protection" :
+                                "Maintenance not acknowledged: settle pending launches/power requests first; protection must not be released",
+                            pending: pending, update: update, pendingLaunch: launchState?.request,
+                            systemUpdateId: maintenanceSettled ? maintenance.id : nil)
+                RunLoop.current.run(until: Date().addingTimeInterval(1))
+                continue
+            }
+            lastMaintenanceID = nil
             if let unsettled = launchState {
                 let orphaned = unsettled.disposition == .orphaned
                 let message = orphaned ?
@@ -407,6 +457,7 @@ func run() throws {
                 pending.removeAll { config.excludedApps.contains($0) }
                 var identity = surgeIdentity()
                 var waitingForIdentity = false
+                var waitingForNetwork = false
                 let needsSurge = identity.pid == nil || identity.reason == "surge_egress_identity_mismatch"
                 if !needsSurge, identity.verified || identity.reason == "dedicated_group_not_required" {
                     surgeRetry.succeeded(at: SystemClock.seconds, launched: false)
@@ -415,6 +466,7 @@ func run() throws {
                     do {
                         let result = try ensureSurge(quitTimeout: config.quitTimeoutSeconds)
                         waitingForIdentity = result == .waitingForBlock
+                        waitingForNetwork = result == .waitingForNetwork
                         surgeRetry.succeeded(at: SystemClock.seconds, launched: result == .launched)
                         if result == .launched {
                             event("surge_launch_requested", "Surge identity/startup verified; still waiting for enhanced mode and policy")
@@ -426,10 +478,10 @@ func run() throws {
                     identity = surgeIdentity()
                 }
                 // A pause arriving during a bounded operation is acknowledged only after that operation settles.
-                if try GateUpdate.load()?.paused == true || GatePendingLaunch.load() != nil { continue }
+                if try SystemUpdate.load() != nil || GateUpdate.load()?.paused == true || GatePendingLaunch.load() != nil { continue }
                 // Identity checks can outlive a status snapshot; read authorization immediately before restoring apps.
                 var status = StatusReport.read()
-                if status.state == "allowed", status.firewallVerified, let target = pending.first, SystemClock.seconds >= nextLaunch {
+                if !waitingForNetwork, status.state == "allowed", status.firewallVerified, let target = pending.first, SystemClock.seconds >= nextLaunch {
                     switch Result(catching: { try launch(target) }) {
                     case .success(let requestedLaunch):
                         pending.removeFirst()
@@ -447,14 +499,17 @@ func run() throws {
                     status = StatusReport.read()
                 }
                 let state = surgeRetry.failure != nil ? "recovery_failed" : waitingForIdentity ? "waiting_identity" :
+                    waitingForNetwork ? "waiting_network" :
                     status.state == "unknown" ? "unknown" : status.state == "allowed" ? (pending.isEmpty ? "ready" : "restoring") : "waiting"
                 let message = surgeRetry.failure.map { "\($0); next attempt in \(max(0, Int(ceil(surgeRetry.nextAttempt - SystemClock.seconds))))s" } ??
                     (waitingForIdentity ? "Waiting for verified blocking before correcting Surge's egress identity" :
+                        waitingForNetwork ? "Waiting for macOS primary IPv4 network before starting Surge; DHCP or captive evaluation may still be in progress" :
                         status.state == "allowed" ? "\(pending.count) application(s) pending" : "\(status.state): \(status.reason)")
                 try publish(state, message, pending: pending, surge: identity, update: update)
                 if message != lastMessage, surgeRetry.failure == nil {
                     let code: String
-                    if status.state == "unknown" { code = "gate_status_unavailable" }
+                    if waitingForNetwork { code = "gate_waiting_network" }
+                    else if status.state == "unknown" { code = "gate_status_unavailable" }
                     else if lastGuardState == "unknown" { code = "gate_status_recovered" }
                     else if status.state != "allowed" { code = "gate_waiting" }
                     else { code = pending.isEmpty ? "gate_ready" : "gate_restore_progress" }

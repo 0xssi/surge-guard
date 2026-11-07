@@ -134,7 +134,7 @@ final class PacketAuditService {
             if let ready = captureReadyUptime, now - ready >= 10 { snapshot.captureHistoryHasGaps = true }
         }
         let guardReport = StatusReport.read()
-        snapshot.guardState = guardReport.firewallVerified ? guardReport.state : "unknown"
+        snapshot.guardState = guardReport.firewallVerified || guardReport.maintenanceVerified ? guardReport.state : "unknown"
         snapshot.guardRunId = guardReport.snapshot?.runId
         snapshot.guardCheckedUptime = guardReport.snapshot?.checkedUptime
         querySurgeRequests()

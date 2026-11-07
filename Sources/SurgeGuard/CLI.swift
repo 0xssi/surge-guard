@@ -9,6 +9,8 @@ enum CLI {
       check [--json] [--config FILE]   Probe conditions; does not prove PF is active
       status [--json]                  Read the daemon's recent verified status
       doctor                          Explain conditions, configuration and service status
+      diagnose [--minutes 1...120] [--watch-seconds 1...300] [--json]
+                                      User-only merged evidence; default 20m; bounded private report
       observe-egress [--json]          Read-only socket/interface sample; not a no-bypass certificate
       audit-status [--json]            Independent packet recorder status; never proof of no bypass
       audit-request-sample             Normal-user read-only Surge request metadata snapshot (JSON)
@@ -32,6 +34,8 @@ enum CLI {
       sudo logs [--follow] [--json]    Readable recent events; optional follow or JSON Lines
       format-logs [--json]             Render log records from stdin without privileges
       sudo unlock                     Stop and remove this gate; reboot/start re-arms it
+      sudo os-update-begin            Pause protection for ALL apps across reboots; verify Gate first
+      sudo os-update-end              Finish/cancel macOS maintenance and verify restored protection
       sudo uninstall                  Remove installed system components; retain configuration/logs
 
     Enhanced mode preserves Surge routing and DIRECT policies. This is a reactive
@@ -46,6 +50,8 @@ enum CLI {
         let readiness: Readiness
         var session: SessionObservation?
         var reasons: [String]
+        var usbTcpBindings: [USBTCPBinding]?
+        var localTcpErrors: [String]?
     }
 
     static func policy(_ args: [String]) throws -> Configuration {
@@ -67,6 +73,11 @@ enum CLI {
         let readiness = try Probe.readiness()
         var report = CheckReport(ready: readiness.ready, mode: configuration.mode,
                                  readiness: readiness, reasons: readiness.reasons)
+        if configuration.allowsLANTCP {
+            let inventory = LocalTCPInventory()
+            report.usbTcpBindings = inventory.usb
+            report.localTcpErrors = inventory.errors.isEmpty ? nil : inventory.errors
+        }
         if configuration.mode == "routes" {
             do {
                 let session = try geteuid() == 0 ? Probe.privilegedSession(configuration: configuration, helperPath: helperPath) : Probe.session(configuration: configuration)
@@ -107,11 +118,28 @@ enum CLI {
     static func run(_ args: [String]) throws {
         guard let action = args.first else { print(usage); return }
         if ["help", "--help", "-h"].contains(action) || args.contains("--help") || args.contains("-h") { print(usage); return }
+        if action == "diagnose" {
+            try DiagnosticCommand.run(Array(args.dropFirst()))
+            return
+        }
         if action == "session-probe" {
             guard args.count == 2, let uid = UInt32(args[1]) else { throw GuardError("Invalid internal session probe") }
             try Probe.dropPrivileges(to: uid)
             let observation = try Probe.session(configuration: Configuration.load())
             print(try JSON.encode(observation))
+            return
+        }
+        if action == "os-update-gate-probe" {
+            guard args.count == 3, let uid = UInt32(args[1]), let id = UUID(uuidString: args[2]) else {
+                throw GuardError("Invalid internal maintenance probe")
+            }
+            try Probe.dropPrivileges(to: uid)
+            let service = try Command.run("/bin/launchctl", ["print", "gui/\(uid)/\(UserPaths.label)"])
+            guard let account = getpwuid(uid) else { throw GuardError("Cannot resolve Gate state owner") }
+            let path = String(cString: account.pointee.pw_dir) + "/Library/Application Support/SurgeGuard/gate-status.json"
+            let data = try UserPaths.readPrivate(path, maximumBytes: GateSession.maximumBytes)
+            let acknowledged = try data.map { try SystemUpdate.gateAcknowledged($0, service: service, id: id) } ?? false
+            print(try JSON.encode(["acknowledged": acknowledged]))
             return
         }
         if action == "audit-request-probe" {
@@ -201,13 +229,22 @@ enum CLI {
             }
             try Command.checked("/usr/bin/open", ["-a", "TextEdit", draft])
         default:
-            guard ["install", "start", "restart", "backup", "rollback", "restore-policy", "run", "unlock", "uninstall", "configure", "logs"].contains(action) else {
+            guard ["install", "start", "restart", "backup", "rollback", "restore-policy", "run", "unlock", "uninstall", "configure", "logs", "os-update-begin", "os-update-end"].contains(action) else {
                 throw GuardError("Unknown command: \(action)")
             }
             guard geteuid() == 0 else { throw GuardError("\(action) requires administrator privileges") }
             let management = !["run", "logs"].contains(action) ? try RuntimeLock(management: true) : nil
             defer { withExtendedLifetime(management) {} }
+            if !["run", "logs", "unlock", "os-update-begin", "os-update-end"].contains(action) { try SystemUpdate.requireNormalOperation() }
+            if action.hasPrefix("os-update-") {
+                guard URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path == Paths.binary else {
+                    throw GuardError("Use the installed root-owned guard for system update maintenance")
+                }
+                try RootFiles.verify(Paths.binary)
+            }
             switch action {
+            case "os-update-begin": try SystemUpdateAdmin.begin()
+            case "os-update-end": try SystemUpdateAdmin.end()
             case "install": try Admin.install()
             case "start":
                 try Admin.start()

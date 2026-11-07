@@ -12,6 +12,7 @@ public enum Paths {
     public static let configuration = publicState + "/policy.json"
     public static let snapshot = publicState + "/status.json"
     public static let unlockMarker = publicState + "/unlocked.json"
+    public static let addressHistory = runtime + "/addresses.json"
     public static let backups = runtime + "/backups"
 }
 
@@ -122,7 +123,11 @@ public struct PFBlockCounters: Codable, Equatable {
 
 public final class Firewall {
     public private(set) var lanTCPBindings: [LANTCPBinding] = []
+    public private(set) var usbTCPBindings: [USBTCPBinding] = []
     private var knownAddresses = Set<String>()
+    private let historyPath: String?
+    private var historyLoaded = false
+    private var revokedLocalStates = Set<[String]>()
     private var expectedRules: String?
     private let tokenPath = Paths.runtime + "/pf-token"
     public private(set) var revision = 0
@@ -134,14 +139,77 @@ public final class Firewall {
     private var blockCounterContinuity = true
     private var nextBlockCounterSample: Double = 0
 
-    public init() {}
+    public init(historyPath: String? = Paths.addressHistory) { self.historyPath = historyPath }
+
+    private struct AddressHistory: Codable {
+        let version: Int
+        let bootId: String
+        let addresses: [String]
+
+        func validate() throws {
+            guard version == 1, !bootId.isEmpty, bootId.utf8.count <= 128, addresses.count <= 512,
+                  Set(addresses).count == addresses.count, addresses.allSatisfy({ address in
+                      var ipv4 = in_addr(), ipv6 = in6_addr()
+                      return address.utf8.count <= 45 && !address.utf8.contains(0) &&
+                          (inet_pton(AF_INET, address, &ipv4) == 1 || inet_pton(AF_INET6, address, &ipv6) == 1)
+                  }) else { throw GuardError("Invalid PF address history") }
+        }
+    }
+
+    private func loadAddressHistory() throws {
+        guard !historyLoaded else { return }
+        if let historyPath, let data = try UserPaths.readPrivate(historyPath, maximumBytes: 65_536) {
+            guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(fields.keys) == ["version", "boot_id", "addresses"] else { throw GuardError("Invalid PF address history fields") }
+            let history = try JSON.decode(AddressHistory.self, from: data)
+            try history.validate()
+            if history.bootId == SystemClock.bootID { knownAddresses.formUnion(history.addresses) }
+        }
+        historyLoaded = true
+    }
+
+    private func saveAddressHistory() throws {
+        guard let historyPath else { return }
+        let history = AddressHistory(version: 1, bootId: SystemClock.bootID, addresses: knownAddresses.sorted())
+        try history.validate()
+        let encoded = try JSON.encode(history)
+        guard encoded.utf8.count <= 65_536 else { throw GuardError("PF address history exceeds its size limit") }
+        try RootFiles.write(encoded, to: historyPath)
+    }
 
     @discardableResult
     public func setLANTCP(_ bindings: [LANTCPBinding]) throws -> Bool {
         _ = try LANTCP.rules(bindings: bindings)
         guard bindings != lanTCPBindings else { return false }
+        for binding in lanTCPBindings where !bindings.contains(binding) {
+            for peer in LANTCP.networks { rememberLocalStateCleanup(address: binding.address, peer: peer) }
+        }
         lanTCPBindings = bindings
         return true
+    }
+
+    @discardableResult
+    public func setUSBTCP(_ bindings: [USBTCPBinding]) throws -> Bool {
+        _ = try USBTCP.rules(bindings: bindings)
+        guard bindings != usbTCPBindings else { return false }
+        for binding in usbTCPBindings where !bindings.contains(binding) {
+            let peer = binding.interface.hasPrefix("utun") ? USBTCP.tunnelNetwork(binding.address)! : "fe80::/10"
+            rememberLocalStateCleanup(address: binding.address, peer: peer)
+        }
+        usbTCPBindings = bindings
+        return true
+    }
+
+    private func rememberLocalStateCleanup(address: String, peer: String) {
+        revokedLocalStates.insert(["-k", address, "-k", peer])
+        revokedLocalStates.insert(["-k", peer, "-k", address])
+    }
+
+    public func clearRevokedLocalStates(clear: ([String]) throws -> Void = {
+        try Command.checked("/sbin/pfctl", $0, timeout: 5)
+    }) throws {
+        for arguments in revokedLocalStates.sorted(by: { $0.lexicographicallyPrecedes($1) }) { try clear(arguments) }
+        revokedLocalStates.removeAll()
     }
 
     public func attached() throws -> Bool {
@@ -150,6 +218,17 @@ public final class Firewall {
 
     public func prepareAttachment() throws {
         try Self.preparingAttachment({ try prepareAttachmentRules() }, blockOnFailure: { _ = try block() })
+    }
+
+    public func prepareBlocking() throws {
+        try Self.preparingAttachment({
+            try RootFiles.verify(Policy.anchorPath)
+            if try String(contentsOfFile: Policy.anchorPath) == SystemUpdate.suspendedAnchor {
+                try RootFiles.write(Policy.blocked, to: Policy.anchorPath, mode: 0o644)
+            }
+            try prepareAttachment()
+        }, blockOnFailure: { _ = try block() })
+        try block()
     }
 
     public static func preparingAttachment(_ prepare: () throws -> Void, blockOnFailure: () throws -> Void) throws {
@@ -255,15 +334,22 @@ public final class Firewall {
     }
 
     public func rememberAddresses() throws {
+        try loadAddressHistory()
+        let previous = knownAddresses
         knownAddresses.formUnion(try Probe.addresses().filter { !$0.loopback }.map(\.address))
+        if knownAddresses != previous { try saveAddressHistory() }
     }
 
     public func clearStates(addresses: () throws -> Set<String>, clear: (String) throws -> Void) throws {
+        let loaded = Result { try loadAddressHistory() }
         let current = Result { try addresses() }
         if case .success(let addresses) = current { knownAddresses.formUnion(addresses) }
+        let saved = Result { try loaded.get(); try saveAddressHistory() }
         // Enumeration failure must not skip cleanup of addresses already observed while allowed.
         for address in knownAddresses.sorted() { try clear(address) }
+        try saved.get()
         knownAddresses = try current.get()
+        try saveAddressHistory()
     }
 
     public func readRules() throws -> String {
@@ -275,24 +361,49 @@ public final class Firewall {
         return try readRules() == expectedRules
     }
 
+    public func systemUpdateSuspended() throws -> Bool {
+        try RootFiles.verify(Policy.anchorPath)
+        return try String(contentsOfFile: Policy.anchorPath) == SystemUpdate.suspendedAnchor &&
+            readRules().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public func suspendForSystemUpdate() throws {
+        try RootFiles.verify(Policy.anchorPath)
+        let disk = try String(contentsOfFile: Policy.anchorPath)
+        guard disk == Policy.blocked || disk == SystemUpdate.suspendedAnchor else {
+            throw GuardError("Unexpected managed anchor contents; refusing system update maintenance")
+        }
+        try SystemUpdate.suspend(writeAnchor: {
+            try RootFiles.write(SystemUpdate.suspendedAnchor, to: Policy.anchorPath, mode: 0o644)
+        }, clearRules: {
+            try Command.checked("/sbin/pfctl", ["-a", Policy.anchor, "-F", "rules"], timeout: 5)
+        }, verify: { try self.systemUpdateSuspended() })
+        revision += 1
+        expectedRules = nil
+    }
+
     @discardableResult
-    public func block() throws -> (rulesLoadedUptime: Double, statesClearedUptime: Double) {
+    public func block(clearExistingStates: Bool = true) throws -> (rulesLoadedUptime: Double, statesClearedUptime: Double) {
         // Load fail-closed rules before slower integrity checks. If the anchor
         // was detached, ensureEnabled still rejects the transition.
         try Command.checked("/sbin/pfctl", ["-a", Policy.anchor, "-f", "-"],
-                            input: Policy.blockedRules(lanTCPBindings: lanTCPBindings), timeout: 5)
+                            input: Policy.blockedRules(lanTCPBindings: lanTCPBindings, usbTCPBindings: usbTCPBindings), timeout: 5)
         let rulesLoaded = SystemClock.seconds
         revision += 1
         try ensureEnabled()
         let actual = try readRules()
         guard actual.contains("surge-guard-block") else { throw GuardError("Block rule did not load") }
         try verifyLANTCP(actual)
+        try verifyUSBTCP(actual)
         // States precede PF rule evaluation. Terminate states involving this
         // Mac, including old interface addresses; never flush all PF state.
-        try clearStates(addresses: { Set(try Probe.addresses().filter { !$0.loopback }.map(\.address)) }) { address in
-            try Command.checked("/sbin/pfctl", ["-k", address], timeout: 5)
-            try Command.checked("/sbin/pfctl", ["-k", address.contains(":") ? "::/0" : "0.0.0.0/0", "-k", address], timeout: 5)
-        }
+        if clearExistingStates {
+            try clearStates(addresses: { Set(try Probe.addresses().filter { !$0.loopback }.map(\.address)) }) { address in
+                try Command.checked("/sbin/pfctl", ["-k", address], timeout: 5)
+                try Command.checked("/sbin/pfctl", ["-k", address.contains(":") ? "::/0" : "0.0.0.0/0", "-k", address], timeout: 5)
+            }
+            revokedLocalStates.removeAll()
+        } else { try clearRevokedLocalStates() }
         expectedRules = actual
         let cleared = SystemClock.seconds
         if let blockID {
@@ -310,11 +421,11 @@ public final class Firewall {
     }
 
     public func allow(group: UInt32? = nil, interface: String? = nil) throws {
-        guard group != nil || lanTCPBindings.isEmpty else { throw GuardError("LAN TCP exceptions require persistent TCP enforcement") }
+        guard group != nil || (lanTCPBindings.isEmpty && usbTCPBindings.isEmpty) else { throw GuardError("Local TCP exceptions require persistent TCP enforcement") }
         try ensureEnabled()
         if let group {
             guard let interface else { throw GuardError("Persistent TCP policy needs a verified Surge interface") }
-            let rules = try Policy.persistentTCP(group: group, interface: interface, lanTCPBindings: lanTCPBindings)
+            let rules = try Policy.persistentTCP(group: group, interface: interface, lanTCPBindings: lanTCPBindings, usbTCPBindings: usbTCPBindings)
             try Command.checked("/sbin/pfctl", ["-a", Policy.anchor, "-f", "-"], input: rules, timeout: 5)
         } else {
             try Command.checked("/sbin/pfctl", ["-a", Policy.anchor, "-F", "rules"], timeout: 5)
@@ -328,9 +439,11 @@ public final class Firewall {
                 throw GuardError("Persistent TCP rules were not verified")
             }
             try verifyLANTCP(actual)
+            try verifyUSBTCP(actual)
         } else if !actual.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw GuardError("Surge Guard rules were not cleared")
         }
+        try clearRevokedLocalStates()
         expectedRules = actual
         blockID = nil
     }
@@ -341,6 +454,15 @@ public final class Firewall {
         guard expected.allSatisfy(actual.contains),
               actual.filter({ $0.contains("label \"surge-guard-lan-") }).count == expected.count else {
             throw GuardError("LAN TCP rules were not verified")
+        }
+    }
+
+    private func verifyUSBTCP(_ rules: String) throws {
+        let actual = Set(rules.split(separator: "\n").map(String.init))
+        let expected = try USBTCP.rules(bindings: usbTCPBindings).split(separator: "\n").map(String.init)
+        guard expected.allSatisfy(actual.contains),
+              actual.filter({ $0.contains("label \"surge-guard-usb-") }).count == expected.count else {
+            throw GuardError("USB TCP rules were not verified")
         }
     }
 

@@ -51,6 +51,7 @@ public enum Policy {
     // captive-portal, general LAN, or general ICMP exception is granted.
     public static let blocked = """
     pass out on ! lo0 inet proto udp from any port 68 to 255.255.255.255 port 67 tag SG_LINK no state
+    pass out on ! lo0 inet proto udp from (self) port 68 to any port 67 user root tag SG_LINK no state
     pass in on ! lo0 inet proto udp from any port 67 to any port 68 tag SG_LINK no state
     pass out on ! lo0 inet6 proto udp from fe80::/10 port 546 to ff02::1:2 port 547 tag SG_LINK no state
     pass in on ! lo0 inet6 proto udp from fe80::/10 port 547 to fe80::/10 port 546 tag SG_LINK no state
@@ -66,18 +67,18 @@ public enum Policy {
 
     """
 
-    public static func blockedRules(lanTCPBindings: [LANTCPBinding] = []) throws -> String {
-        try LANTCP.rules(bindings: lanTCPBindings) + blocked
+    public static func blockedRules(lanTCPBindings: [LANTCPBinding] = [], usbTCPBindings: [USBTCPBinding] = []) throws -> String {
+        try LANTCP.rules(bindings: lanTCPBindings) + USBTCP.rules(bindings: usbTCPBindings) + blocked
     }
 
-    public static func persistentTCP(group: UInt32, interface: String, lanTCPBindings: [LANTCPBinding] = []) throws -> String {
+    public static func persistentTCP(group: UInt32, interface: String, lanTCPBindings: [LANTCPBinding] = [], usbTCPBindings: [USBTCPBinding] = []) throws -> String {
         guard (60_000...60_999).contains(group), interface.hasPrefix("utun"),
               interface.count > 4, interface.count < 16,
               interface.dropFirst(4).allSatisfy({ $0.isASCII && $0.isNumber }) else {
             throw GuardError("Invalid dedicated egress group or verified Surge interface")
         }
         // Bind VIF states to that interface; they must not authorize physical egress after route changes.
-        return try LANTCP.rules(bindings: lanTCPBindings) + """
+        return try LANTCP.rules(bindings: lanTCPBindings) + USBTCP.rules(bindings: usbTCPBindings) + """
         pass out quick on \(interface) inet proto tcp from 198.18.0.1 to any keep state (if-bound) label "surge-guard-vif"
         pass out quick on ! lo0 proto tcp all group \(group) keep state (if-bound) label "surge-guard-egress"
         block drop quick on ! lo0 proto tcp all label "surge-guard-tcp-block"

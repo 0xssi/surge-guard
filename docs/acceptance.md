@@ -83,6 +83,40 @@ Enable SwiftBar's Launch at Login or register it in macOS Login Items, then log
 in again and confirm the menu, refresh entry and both fresh service states.
 Plugin installation alone does not configure or verify SwiftBar login startup.
 
+For the Gate startup-network prerequisite, authorize a reboot/login with delayed
+Wi-Fi/DHCP or captive-network evaluation. With Surge absent and Guard blocked,
+confirm `waiting_network` while macOS has no primary IPv4 interface, even if an
+interface already has a DHCP address. No Surge launch/pending marker should be
+submitted during that wait. Confirm the menu/log explains the wait without
+claiming an outage or PF permission, and that update pause/resume and ordered
+shutdown remain responsive. Once macOS publishes the primary IPv4 network,
+Gate should submit a normal launch on its next eligible loop without a fixed
+delay or a new 30-second failure cooldown. Application restoration still waits
+for fresh verified allowed Guard status. Retain an existing valid Surge, respect
+manual Enhanced Mode preferences, and exercise both enhanced and persistent TCP
+policies. Do not alter PF or captive-network settings to turn a failed case into
+a pass; record any unresolved startup race separately.
+
+For explicit `os-update-begin` / `os-update-end`, use a disposable Mac/VM and
+authorize the all-application direct-access interval first. Upgrade Guard/Gate
+and install the offline recovery menu. Check that old/stopped Gate, active or
+orphaned launches, queued power requests and stale/wrong-nonce status prevent
+release. Cancel preparation and confirm saved sessions and the original Surge
+update pause survive. Enter maintenance and verify the own disk anchor and live
+rules are empty, with other anchors/NAT/options retained; check orange status,
+fresh process-bound `maintenance`, paused Gate, and no green protection claim.
+Restart Guard, Gate and the machine, including multiple reboots: no automatic
+re-arm or session loss. Ensure normal Guard mutations are refused. Fault each
+phase (checkpoint/disk write, rule clear, startup, PF query, restoration and final
+checkpoint removal), retry and verify no false completion. Test missing default
+PF attachment recovery on End, and refusal of custom/unsafe layouts. Verify End
+clears old states and accepts freshly verified blocked or allowed protection
+before Gate resumes. End must preserve an existing Surge `update-pause`.
+Check the independent emergency and fallback-menu paths with a broken renderer;
+an emergency rule removal must leave the maintenance checkpoint intact. Confirm
+normal menu/Gate operation after End. Real macOS download/install/reboot and
+first-login completion are separate live tests; unit tests do not establish them.
+
 Verify the companion waits on recent system `allowed` status before each app
 launch. Test bundle IDs, ordering, an absent app, failed launch retry and a changed
 excluded-app setting. Confirm no lost pending apps. Verify periodic atomic
@@ -247,14 +281,26 @@ neither a clean capture nor PF drop counters prove universal absence of bypass.
 Use a separate disposable session for these disruptive scenarios; the source
 regressions do not establish their live outcomes.
 
-- For a Surge child started by the updated Gate, compare a normal quit and an
-  explicitly authorized signal termination with `surge_child_exited`. Verify
-  launch ID/PID/native birth time, exit-code versus signal distinction, and the
-  startup-verification flag. Verify identity repair and ordered power operations
+- Before disruptive Surge tests, run `.build/debug/surge-guard-tests --gate-launchd-check`
+  explicitly in a GUI session. This loads only a disposable `/bin/sleep` job;
+  verify PPID 1, a separate process group, non-child exit notification and
+  automatic job removal. The ordinary check script does not load launchd jobs.
+- For a Surge started by the updated Gate, verify the GUI one-shot job's actual
+  PID/native birth time matches trusted Surge and its dedicated credentials,
+  PPID is 1 and the process group is independent of Gate. Compare a normal quit
+  and an explicitly authorized signal termination with `surge_job_process_exited`.
+  Verify launch ID/PID/native birth time and startup-verification flag; non-child
+  records must not invent an exit code, signal or sender. Historical direct-child
+  records retain their original exit code/signal distinction. Verify identity repair and ordered power operations
   record their quit request before calling the app, with acceptance separate
   from actual exit. Do not infer the external signal sender or PF state from
-  these records. Restarting Gate around an existing Surge must not claim child
-  exit-status coverage for that existing process.
+  these records. Restarting Gate around an existing Surge without a pending job
+  must not claim coverage for that existing process. Verify no job restarts Surge
+  while update pause is acknowledged, and no job remains after its process exits.
+  Test Gate restart during submission, a queued job, startup, early launcher
+  failure and a 10-second startup timeout: active submissions/jobs must fence
+  update pause and ordered shutdown; query errors remain unknown. Perform any
+  Wi-Fi/VPN reconnect compatibility replay only with separate authorization.
 - Change the Surge candidate set while Guard is allowed and while already blocked.
   Verify signature and route results are invalidated, including a second candidate
   appearing during signature validation. Reopening requires new route evidence.
@@ -287,3 +333,94 @@ retain the exception. Test cold boot and service updates separately: startup and
 state cleanup may still interrupt LAN connections. Do not infer these live
 results from parser/unit tests. This option neither adds UDP DNS/mDNS recovery
 nor proves that a permitted LAN peer cannot proxy onward.
+
+## Apple USB development link
+
+With no Apple USB NCM device attached, confirm `check --json` returns a structured
+condition report with empty `usb_tcp_bindings`, rather than an enumeration error.
+A successful empty native inventory must not invalidate the policy; genuine
+enumeration failures must still revoke the local exceptions and fail closed.
+
+With the existing `allow_lan_tcp` opt-in, attach an unlocked iPhone/iPad with
+Developer Mode enabled. Check `check --json` / fresh `status --json` for
+`usb_tcp_bindings`, and read back the own PF anchor: each USB rule must be IPv6
+TCP only, bind an actual local link-local address and Apple NCM interface, use
+`fe80::/10` peers and `keep state (if-bound)`. Compare native interface inventory
+with the NCM device from `remotectl dumpstate`. CoreDevice's second-stage tunnel
+must also appear, with TCP rules bound to its actual ULA address and ULA /64;
+adding that tunnel must not destroy its established USB carrier connection.
+Confirm CoreDevice connects and
+the existing app installs/launches without turning off Surge Enhanced Mode.
+Unplug/reconnect and verify old bindings disappear and any new names/addresses
+replace them. Wi-Fi/unrelated-VPN/global IPv6, IPv4 and unrelated USB interfaces must not
+receive a USB exception. Disable the local TCP option only in an authorized
+window; both local exceptions must be revoked. An injected optional USB-inventory
+failure must revoke only USB scope and retain verified LAN scope, and vice versa.
+Failed common address/readiness enumeration still blocks. Inspect
+`local_tcp_errors`, failure/recovery events and corresponding old-state cleanup;
+an optional inventory error alone must not clear public Surge connections.
+Record blocked-state, reboot and packet-level tests separately from normal
+installation and unit tests. This exception does not exempt iCloud traffic.
+
+## Merged diagnostics and short observation
+
+Install the checked user renderer/menu through `install-user.sh --menu-only`.
+Record Guard/Gate/Surge PID and native birth identity before and after; those
+services must remain unchanged. Verify both diagnostic actions and the prominent
+Surge prepare/finish-update actions appear. Diagnostic authentication may only
+read the fixed private event files; user collection/formatting remains unprivileged.
+
+- Run `diagnose --minutes 20 --json` with and without a usable sudo credential.
+  Validate one JSON object, retained raw event/process/error fields, explicit
+  unavailable sources and observed ranges. Neither truncated messages nor empty
+  observations may become a clean-health/no-bypass conclusion.
+- Run `diagnose --watch-seconds 5 --json`. Verify automatic completion, start/end
+  snapshots, deduplicated bounded DNS/QUIC/socket context and private report
+  permissions. Run another observation and interrupt it after a checkpoint;
+  the previous session and latest checkpoint must remain readable. Do not claim
+  that a retained timestamp range is complete packet coverage.
+- Exercise rotated, malformed, undated, oversized, symlink, writable and FIFO
+  inputs using isolated fixtures. Verify explicit omissions/gaps and bounded
+  memory/output. A non-overlapping Surge memory window is unverified continuity,
+  not proof that a particular event was lost.
+- In a separately authorized update window, prepare a Surge update, wait for
+  exact-request Gate acknowledgement, perform/cancel the official update, and
+  finish/resume. A refused or timed-out acknowledgement must not print success.
+  Resume acknowledgement alone must not claim networking or PF has recovered;
+  fresh status must show the actual result. Keep identity verification and the
+  30-second real-failure backoff. Do not quit/update Surge just to test labels.
+
+Short observations do not enable the packet recorder or create any PF/DNS
+permission. Packet capture remains an explicit separate audit operation with
+the documented bounded ring, payload/privacy and coverage limits.
+
+## Review-fix fault cases
+
+Run live cases only in an explicitly authorized maintenance window with offline
+recovery available. Unit/fake-command cases do not replace these checks.
+
+- Inject an IPv6 dynamic-store error while all other readiness checks pass.
+  Verify no allow transition. Distinguish genuine NoKey from a read failure,
+  wrong type or a present empty dictionary.
+- With a safely backed-up installation, combine a corrupt maintenance record
+  and a supported missing PF attachment. Startup/End must attempt blocking
+  anchor restoration and attachment repair, retain the corrupt record and its
+  original error, and never report verified protection after failed cleanup.
+  Valid active maintenance must retain its empty anchor across restart.
+- In isolated network/state fixtures, replace the daemon while an old local
+  address is absent, then restore the address before its previous PF state
+  expires. Verify the boot-bound address checkpoint participates in cleanup.
+  Record packet evidence separately; a persisted list alone is not a no-bypass pass.
+- Exercise DHCPv4 unicast renewal during blocking. Only local-source root-owned
+  UDP 68 to server UDP 67 should receive the renewal exception; ordinary-user
+  UDP, DNS and public application traffic remain blocked. Do not infer lease
+  loss merely from a failed renewal before the broadcast rebind phase.
+- Race independent emergency removal against Start. Management/runtime lock
+  contention must prevent rule clearing while a daemon holds its runtime lock.
+  Query/lock failure must abort, and a successful terminal message describes only
+  the verified service/PF observation. The independent path records a system-log
+  event and does not create the CLI's unlocked marker.
+- Verify loaded-but-stopped Start requests a non-forced kickstart and waits for
+  fresh status. Delay several URL queries and deliver a network change while
+  they run: queries must remain bounded, preserve URL order and reject results
+  from the previous generation. Three-second expiry is never extended.

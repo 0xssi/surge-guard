@@ -5,8 +5,11 @@ public final class GateChildExitObserver {
     private let launchID: UUID
     private var child: SurgeProcess?
     private var startupVerified = false
+    private var source: DispatchSourceProcess?
+    private var watchGeneration: UInt64 = 0
 
     public init(launchID: UUID) { self.launchID = launchID }
+    deinit { source?.cancel() }
 
     public func recordIdentity(_ identity: SurgeProcess?) {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -16,6 +19,36 @@ public final class GateChildExitObserver {
     public func verifiedStartup(matching identity: SurgeProcess) {
         dispatchPrecondition(condition: .onQueue(.main))
         if child == identity { startupVerified = true }
+    }
+
+    public func attachToLaunchdProcess(_ identity: SurgeProcess, onExit: @escaping ([String: Any]) -> Void) throws {
+        dispatchPrecondition(condition: .onQueue(.main))
+        source?.cancel()
+        watchGeneration &+= 1
+        let generation = watchGeneration
+        child = identity
+        startupVerified = false
+        let watch = DispatchSource.makeProcessSource(identifier: identity.pid, eventMask: .exit, queue: .main)
+        source = watch
+        watch.setEventHandler { [weak self] in self?.launchdExited(identity, generation: generation, onExit: onExit) }
+        watch.resume()
+        do {
+            // Cover exit/PID reuse between the caller's native query and watch registration.
+            if try SurgeProcess.read(pid: identity.pid) != identity { launchdExited(identity, generation: generation, onExit: onExit) }
+        } catch { source?.cancel(); source = nil; throw error }
+    }
+
+    private func launchdExited(_ identity: SurgeProcess, generation: UInt64, onExit: ([String: Any]) -> Void) {
+        guard source != nil, child == identity, watchGeneration == generation else { return }
+        source?.cancel(); source = nil
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        onExit(["launch_id": launchID.uuidString, "child_pid": identity.pid,
+                "child_started_seconds": identity.startedSeconds, "child_started_microseconds": identity.startedMicroseconds,
+                "birth_time_available": true, "startup_verified": startupVerified,
+                "process_relationship": "launchd_child", "termination_reason": "unavailable_non_child",
+                "termination_sender": "unknown", "exit_observed_at": formatter.string(from: Date()),
+                "exit_observed_uptime": SystemClock.seconds])
     }
 
     public func attach(to process: Process, onExit: @escaping ([String: Any]) -> Void) {

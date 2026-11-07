@@ -10,21 +10,34 @@ enum SwiftBar {
     }
     static func render(sectionOnly: Bool) -> String {
         let status = StatusReport.read()
-        let modern = ((try? Command.checked(Paths.binary, ["--help"])) ?? "").contains("restore-policy")
+        let installedHelp = (try? Command.checked(Paths.binary, ["--help"])) ?? ""
+        let modern = installedHelp.contains("restore-policy")
+        let maintenance = status.systemUpdate
         let state = ["allowed", "blocked"].contains(status.state) && !status.firewallVerified ? "unknown" : status.state
-        let icon = state == "allowed" ? "🟢" : state == "blocked" ? "🔴" : "🟠"
+        let icon = maintenance != nil ? "🟠" : state == "allowed" ? "🟢" : state == "blocked" ? "🔴" : "🟠"
         let attachmentFailure = status.reason.hasPrefix("pf_attachment_missing:") || status.reason.hasPrefix("pf_attachment_invalid:")
-        let title = attachmentFailure ? "PF 挂载配置异常 · 保护待验证" : !modern && status.daemonRunning ? "旧版运行 · PF 待验证" : ["allowed": "PF 已验证放行", "blocked": "PF 已验证阻断", "stopped": "守护已停止", "unknown": "状态未知", "unlocked": "已手动解除保护"][state] ?? "状态未知"
+        let title = maintenance.map { record in
+            record.phase == .preparing ? "系统更新维护准备中 · 尚未解除保护" :
+                record.phase == .restoring ? "系统更新维护结束中 · 保护恢复待确认" :
+                status.maintenanceVerified ? "系统更新维护中 · 保护已暂停" : "系统更新维护请求 · PF 状态未验证"
+        } ?? (attachmentFailure ? "PF 挂载配置异常 · 保护待验证" : !modern && status.daemonRunning ? "旧版运行 · PF 待验证" : ["allowed": "PF 已验证放行", "blocked": "PF 已验证阻断", "stopped": "守护已停止", "unknown": "状态未知", "unlocked": "已手动解除保护"][state] ?? "状态未知")
         var lines = sectionOnly ? [] : ["\(icon) | size=13", "---"]
         // SwiftBar 2.1.1 clears submenu actions during live updates; a color preserves the action.
         let parentStyle = " | color=#1F2937,#F2F2F7"
         let infoStyle = " | color=#1F2937,#F2F2F7"
         let noteStyle = " | color=#374151,#E5E7EB size=12"
         lines.append("surge-guard · \(icon) \(title)" + parentStyle)
+        if let maintenance {
+            let elapsed = SystemClock.elapsedSeconds(since: maintenance.startedAt.timeIntervalSince1970, now: Date().timeIntervalSince1970)
+                .map { "\($0 / 60) 分钟" } ?? "时间未知"
+            lines.append("-- ⚠️ 系统更新维护：已持续 \(elapsed)，跨重启保留，不会自动到期 | color=#B45309,#FCD34D")
+            lines.append("-- 维护期间全部应用均可能直连；仅解除本工具限制，不保证网络可用" + noteStyle)
+            lines.append("-- 更新完成或取消后，请点击「结束维护并恢复保护」；原策略与 Surge 更新暂停偏好保留" + noteStyle)
+        }
         if attachmentFailure {
             lines.append("-- 系统升级后配置可能被重置；请查看完整诊断。当前未确认保护生效" + noteStyle)
         }
-        if let snapshot = status.snapshot {
+        if let snapshot = status.snapshot, snapshot.enforcement != "os_update_maintenance" {
             let current = status.firewallVerified
             let modeText = snapshot.configurationMode == "routes" ? "增强模式 + 分流检查" : "增强模式"
             let enforcementText = snapshot.enforcement == "persistent_tcp_egress" ? "TCP 常驻规则（Surge 专用组）" : "响应式门禁"
@@ -37,6 +50,9 @@ enum SwiftBar {
                 let scope = bindings.map { "\($0.interface):\($0.address)" }.joined(separator: ", ")
                 lines.append("-- 局域网 TCP 例外：\(current ? "" : "历史记录，")\(bindings.isEmpty ? "暂无匹配网卡" : clean(scope))" + noteStyle)
                 lines.append("-- 策略范围：10/8、172.16/12、192.168/16；不受 Surge 就绪条件限制" + noteStyle)
+                let usb = (snapshot.usbTcpBindings ?? []).map { "\($0.interface):\($0.address)" }.joined(separator: ", ")
+                lines.append("-- Apple USB／开发隧道 TCP 例外：\(current ? "" : "历史记录，")\(usb.isEmpty ? "暂无匹配网卡" : clean(usb))" + noteStyle)
+                lines.append("-- 范围：NCM 链路本地 IPv6、CoreDevice 隧道本地 ULA /64；仅 TCP" + noteStyle)
             }
             let formatter = DateFormatter(); formatter.dateFormat = "HH:mm:ss"
             let age = SystemClock.elapsedSeconds(since: snapshot.checkedUptime, now: SystemClock.seconds)
@@ -50,6 +66,9 @@ enum SwiftBar {
                 lines.append("-- 分流\(current ? "规则" : "历史记录") [\(rMark)]：\(clean(route.url)) → \(clean(route.finalPolicy ?? "未知"))" + infoStyle)
             }
             if snapshot.configurationMode == "routes" { lines.append("-- 说明：只查询规则策略，不向目标发起网络请求" + noteStyle) }
+            for error in snapshot.localTcpErrors ?? [] {
+                lines.append("-- ⚠️ 对应本地 TCP 例外已撤销：\(clean(error)) | color=#92400E,#FCD34D size=12")
+            }
         }
         if !modern, status.daemonRunning {
             lines.append("-- 旧版守护正在运行，PF 状态尚未验证 | color=#92400E,#FCD34D size=12")
@@ -60,14 +79,28 @@ enum SwiftBar {
         let renderer = CLI.userDirectory.appendingPathComponent("bin/surge-guard-ui").path
         let normalBinary = FileManager.default.isExecutableFile(atPath: renderer) ? renderer : Paths.binary
         func command(_ title: String, _ args: [String], root: Bool = false, depth: String = "--") {
-            let recoverable = root && args.count == 1 && ["start", "restart", "unlock", "backup", "rollback", "restore-policy", "logs", "follow-logs", "doctor", "audit-logs", "audit-requests"].contains(args[0]) && FileManager.default.isExecutableFile(atPath: actionHelper)
-            let executable = recoverable ? actionHelper : root ? "/usr/bin/sudo" : normalBinary
+            let recoverable = root && args.count == 1 && ["start", "restart", "unlock", "backup", "rollback", "restore-policy", "logs", "follow-logs", "doctor", "audit-logs", "audit-requests", "os-update-begin", "os-update-end"].contains(args[0]) && FileManager.default.isExecutableFile(atPath: actionHelper)
+            let diagnostic = args.count == 1 && ["diagnose", "diagnose-watch"].contains(args[0]) && FileManager.default.isExecutableFile(atPath: actionHelper)
+            let executable = recoverable || diagnostic ? actionHelper : root ? "/usr/bin/sudo" : normalBinary
             let rootBinary = args.first?.hasPrefix("audit-") == true ? PacketAudit.binary : Paths.binary
             let parameters = (root && !recoverable ? [rootBinary] : []) + args
             lines.append("\(depth) \(title) | bash=\(parameter(executable)) " + parameters.enumerated().map { "param\($0.offset + 1)=\(parameter($0.element))" }.joined(separator: " ") + " terminal=true refresh=true")
         }
         lines.append("-----")
-        if state == "stopped" || state == "unlocked" {
+        if installedHelp.contains("os-update-begin") {
+            if maintenance != nil {
+                command("✅ 结束维护并恢复保护（更新已完成或取消）", ["os-update-end"], root: true)
+                if maintenance?.phase != .restoring && !status.maintenanceVerified {
+                    command("🔄 重试进入系统更新维护", ["os-update-begin"], root: true)
+                }
+            } else {
+                command("🛠️ 准备更新 macOS（跨重启暂停全部应用保护）", ["os-update-begin"], root: true)
+            }
+            lines.append("-----")
+        }
+        if maintenance != nil {
+            command("🔓 应急解除本工具规则（维护状态仍保留）", ["unlock"], root: true)
+        } else if state == "stopped" || state == "unlocked" {
             command("▶️ 启动并恢复防火墙保护", ["start"], root: true)
             lines.append("-- ℹ️ \(status.stoppedExplanation)" + noteStyle)
         } else {
@@ -76,6 +109,12 @@ enum SwiftBar {
         }
         lines.append("-----")
         command("🔍 重新检查放行条件", ["check"])
+        command("🧾 合并检查最近 20 分钟（只读，保存私有报告）", ["diagnose"])
+        if FileManager.default.isExecutableFile(atPath: actionHelper) {
+            command("⏱️ 开始 120 秒 DNS／QUIC 诊断（自动结束）", ["diagnose-watch"])
+        } else {
+            command("⏱️ 开始 120 秒 DNS／QUIC 诊断（自动结束）", ["diagnose", "--watch-seconds", "120"])
+        }
         command("🌐 查看非 Surge 连接与候选域名（只读采样）", ["observe-egress"])
         command("🩺 查看完整诊断 (doctor)", ["doctor"], root: true)
         command("📄 查看最近 200 条日志", ["logs"], root: true)
@@ -84,13 +123,13 @@ enum SwiftBar {
         lines.append("-----")
         lines.append("-- ⚙️ 策略配置与版本备份（离线可用）" + parentStyle)
         command("📝 编辑规则草稿", ["edit-config"], depth: "----")
-        if modern {
+        if modern && maintenance == nil {
             command("✅ 验证并应用规则草稿", ["configure", CLI.draft], root: true, depth: "----")
             lines.append("-------")
             command("💾 备份当前版本与配置", ["backup"], root: true, depth: "----")
             command("⏪ 恢复上一版与配置（rollback）", ["rollback"], root: true, depth: "----")
             command("↩️ 恢复上一次规则配置", ["restore-policy"], root: true, depth: "----")
-        } else {
+        } else if !modern {
             lines.append("---- 当前为旧版系统守护：分流门禁及备份命令尚未启用 | color=#92400E,#FCD34D size=12")
         }
         for kind in ["update", "policy"] {
@@ -140,16 +179,21 @@ enum SwiftBar {
                     lines.append("-- Surge 进程：PID \(identity.pid.map(String.init) ?? "未确认") · 专用组 \(identity.expectedGroup.map(String.init) ?? "未启用")（\(identity.verified ? "已验证" : "未验证")，\(formatter.string(from: identity.checkedAt))）" + infoStyle)
                     if !identity.verified { lines.append("-- 身份原因：\(clean(identity.reason)) | color=#92400E,#FCD34D size=12") }
                 } else { lines.append("-- Surge 身份：待重新验证" + infoStyle) }
-                if let update = report.status.update, update.paused {
+                if ["os_update_paused", "os_update_waiting"].contains(report.status.state) {
+                    lines.append("-- \(clean(report.status.message ?? "系统更新维护"))" + noteStyle)
+                    if report.status.update?.paused == true {
+                        lines.append("-- 原有 Surge 更新暂停偏好仍保留；结束系统维护不会自动取消它" + noteStyle)
+                    }
+                } else if let update = report.status.update, update.paused {
                     let elapsed = SystemClock.elapsedSeconds(since: update.changedAt.timeIntervalSince1970, now: Date().timeIntervalSince1970)
                         .map { "\($0 / 60) 分 \($0 % 60) 秒" } ?? "时间无效"
                     lines.append("-- 当前模式：\(report.status.state == "update_paused" ? "已暂停自动重开 Surge" : "请求暂停，等待确认")（已持续 \(elapsed)） | color=#92400E,#FCD34D size=12")
                     if report.status.state == "update_paused" {
-                        lines.append("-- 说明：已确认暂停，可手动退出或升级 Surge；完成后点击「恢复自动重开」" + noteStyle)
+                        lines.append("-- 说明：已确认暂停，可手动退出或升级 Surge；完成后点击「升级结束并恢复 Surge」" + noteStyle)
                     } else {
                         lines.append("-- 暂停请求尚未确认，暂勿开始升级：\(clean(report.status.message ?? "等待在途操作结束"))" + noteStyle)
                     }
-                } else if ["waiting_identity", "recovery_failed", "error", "launch_pending", "launch_recovery_required"].contains(report.status.state),
+                } else if ["waiting_network", "waiting_identity", "recovery_failed", "error", "launch_pending", "launch_recovery_required"].contains(report.status.state),
                           let message = report.status.message {
                     lines.append("-- 原因：\(clean(message)) | color=#92400E,#FCD34D size=12")
                 }
@@ -159,20 +203,25 @@ enum SwiftBar {
                 lines.append("-- 状态：Gate 状态待验证" + infoStyle)
             }
             lines.append("-----")
-            lines.append("-- ⚡ 安全电源操作 · 先保存会话并关闭应用再断网" + parentStyle + " size=13")
-            for (title, action, color, symbol) in [("有序重启电脑（保存会话并安全断网）", "restart", "#1D4ED8,#93C5FD", "arrow.clockwise"),
-                                                   ("有序关机（保存会话并安全断网）", "shutdown", "#B91C1C,#FCA5A5", "power")] {
-                lines.append("-- \(title) | bash=\(parameter(CLI.gateBinary)) param1=shutdown param2=--action param3=\(action) terminal=true refresh=true color=\(color) size=14 sfimage=\(symbol) width=16 height=16")
-            }
-            lines.append("-- 说明：正常退出应用后验证阻断；未保存文档超时会中止，不保证开机早期零漏流" + noteStyle)
-            if let report = gateReport, report.running, report.fresh,
-               report.status.capabilities?.contains("update_pause_v1") == true {
-                lines.append("-----")
-                if report.status.update?.paused == true {
-                    lines.append("-- ▶️ 恢复自动重开 Surge（升级或手动维护完成后点此） | bash=\(parameter(helperAvailable ? actionHelper : CLI.gateBinary)) param1=\(helperAvailable ? "gate-update-resume" : "update-resume") terminal=true refresh=true color=#B45309,#FCD34D")
-                } else {
-                    lines.append("-- ⏸️ 暂停自动重开 Surge（手动关闭或升级 Surge 时点此） | bash=\(parameter(helperAvailable ? actionHelper : CLI.gateBinary)) param1=\(helperAvailable ? "gate-update-pause" : "update-pause") terminal=true refresh=true")
+            if maintenance == nil {
+                if let report = gateReport, report.running, report.fresh,
+                   report.status.capabilities?.contains("update_pause_v1") == true {
+                    if report.status.update?.paused == true {
+                        lines.append("-- ▶️ 升级结束并恢复 Surge（官方升级已完成或取消） | bash=\(parameter(helperAvailable ? actionHelper : CLI.gateBinary)) param1=\(helperAvailable ? "gate-update-resume" : "update-resume") terminal=true refresh=true color=#B45309,#FCD34D")
+                    } else {
+                        lines.append("-- ⏸️ 准备升级 Surge（暂停自动恢复，保留 PF 保护） | bash=\(parameter(helperAvailable ? actionHelper : CLI.gateBinary)) param1=\(helperAvailable ? "gate-update-pause" : "update-pause") terminal=true refresh=true")
+                    }
+                    lines.append("-- 等待 Gate 确认暂停后再退出或升级；也适用于手动维护 Surge" + noteStyle)
+                    lines.append("-----")
                 }
+                lines.append("-- ⚡ 安全电源操作 · 先保存会话并关闭应用再断网" + parentStyle + " size=13")
+                for (title, action, color, symbol) in [("有序重启电脑（保存会话并安全断网）", "restart", "#1D4ED8,#93C5FD", "arrow.clockwise"),
+                                                       ("有序关机（保存会话并安全断网）", "shutdown", "#B91C1C,#FCA5A5", "power")] {
+                    lines.append("-- \(title) | bash=\(parameter(CLI.gateBinary)) param1=shutdown param2=--action param3=\(action) terminal=true refresh=true color=\(color) size=14 sfimage=\(symbol) width=16 height=16")
+                }
+                lines.append("-- 说明：正常退出应用后验证阻断；未保存文档超时会中止，不保证开机早期零漏流" + noteStyle)
+            } else {
+                lines.append("-- 系统更新请使用 macOS 自己的重启入口；维护期间 Gate 自动启动与会话快照暂停" + noteStyle)
             }
             lines.append("-----")
             if gateReport?.running == false {

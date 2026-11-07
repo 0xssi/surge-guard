@@ -38,10 +38,15 @@ public struct GuardSnapshot: Codable {
     public var enforcement = "surge_readiness_gate"
     public var lanTcpEnabled: Bool?
     public var lanTcpBindings: [LANTCPBinding]?
+    public var usbTcpBindings: [USBTCPBinding]?
+    public var localTcpErrors: [String]?
+    public var capabilities: [String]? = ["os_update_v1"]
+    public var systemUpdateId: UUID?
 
     public init(runId: String, firewallVerifiedUptime: Double, allowed: Bool, configurationMode: String,
                 readiness: Readiness?, session: SessionObservation?, reasons: [String],
-                enforcement: String = "surge_readiness_gate", lanTcpEnabled: Bool? = nil, lanTcpBindings: [LANTCPBinding]? = nil) {
+                enforcement: String = "surge_readiness_gate", lanTcpEnabled: Bool? = nil, lanTcpBindings: [LANTCPBinding]? = nil,
+                systemUpdateId: UUID? = nil, usbTcpBindings: [USBTCPBinding]? = nil, localTcpErrors: [String]? = nil) {
         bootId = SystemClock.bootID
         self.runId = runId
         pid = getpid()
@@ -54,12 +59,18 @@ public struct GuardSnapshot: Codable {
         self.session = session
         self.reasons = reasons
         self.enforcement = enforcement
+        // Old readers must reject maintenance instead of reporting its empty rules as blocked.
+        version = enforcement == "os_update_maintenance" ? 2 : 1
         self.lanTcpEnabled = lanTcpEnabled
         self.lanTcpBindings = lanTcpBindings
+        self.systemUpdateId = systemUpdateId
+        self.usbTcpBindings = usbTcpBindings
+        self.localTcpErrors = localTcpErrors
     }
 
     public func fresh(boot: String = SystemClock.bootID, now: Double = SystemClock.seconds) -> Bool {
-        !boot.isEmpty && version == 1 && bootId == boot && checkedUptime <= now && now - checkedUptime < 8 &&
+        !boot.isEmpty && version == (enforcement == "os_update_maintenance" ? 2 : 1) &&
+            bootId == boot && checkedUptime <= now && now - checkedUptime < 8 &&
             firewallVerifiedUptime <= now && now - firewallVerifiedUptime < 8
     }
 }
@@ -69,9 +80,36 @@ public struct StatusReport: Codable {
     public var daemonRunning: Bool
     public var snapshot: GuardSnapshot?
     public var reason: String
+    public var systemUpdate: SystemUpdate?
 
     public var firewallVerified: Bool {
-        daemonRunning && ["allowed", "blocked"].contains(state) && snapshot?.fresh() == true
+        daemonRunning && ["allowed", "blocked"].contains(state) && snapshot?.fresh() == true &&
+            snapshot?.enforcement != "os_update_maintenance"
+    }
+
+    public var maintenanceVerified: Bool {
+        daemonRunning && state == "maintenance" && snapshot?.fresh() == true &&
+            snapshot?.enforcement == "os_update_maintenance" && systemUpdate?.phase == .active &&
+            snapshot?.systemUpdateId == systemUpdate?.id
+    }
+
+    public func withSystemUpdate(_ record: SystemUpdate?) -> StatusReport {
+        var report = self
+        report.systemUpdate = record
+        if record?.phase == .active {
+            if daemonRunning, snapshot?.fresh() == true, snapshot?.enforcement == "os_update_maintenance",
+               snapshot?.systemUpdateId == record?.id, ["allowed", "blocked", "maintenance"].contains(state) {
+                report.state = "maintenance"
+                report.reason = "system_update_maintenance: protection suspended; all applications may connect directly"
+            } else {
+                report.state = "unknown"
+                report.reason = "system_update_maintenance_unverified: " + reason
+            }
+        } else if snapshot?.enforcement == "os_update_maintenance" {
+            report.state = "unknown"
+            report.reason = "system_update_restoration_not_verified"
+        }
+        return report
     }
 
     public var stoppedExplanation: String {
@@ -80,29 +118,32 @@ public struct StatusReport: Codable {
     }
 
     public static func read() -> StatusReport {
+        let maintenance: SystemUpdate?
+        do { maintenance = try SystemUpdate.load() }
+        catch { return StatusReport(state: "unknown", daemonRunning: false, snapshot: nil, reason: "system_update_invalid: \(error)") }
         let service: CommandResult
         let serviceRunning: Bool
         do {
             service = try Command.run("/bin/launchctl", ["print", "system/" + Paths.label])
             serviceRunning = try self.serviceRunning(service)
         } catch {
-            return StatusReport(state: "unknown", daemonRunning: false, snapshot: nil, reason: "service_query_failed: \(error)")
+            return StatusReport(state: "unknown", daemonRunning: false, snapshot: nil, reason: "service_query_failed: \(error)").withSystemUpdate(maintenance)
         }
-        if !serviceRunning, let marker = try? readUnlockMarker(), marker == SystemClock.bootID, !marker.isEmpty {
+        if maintenance == nil, !serviceRunning, let marker = try? readUnlockMarker(), marker == SystemClock.bootID, !marker.isEmpty {
             return StatusReport(state: "unlocked", daemonRunning: false, snapshot: nil, reason: "manual_unlock_until_start_or_reboot")
         }
         do {
             try RootFiles.verify(Paths.publicState, directory: true)
             try RootFiles.verify(Paths.snapshot)
             let snapshot = try JSON.decode(GuardSnapshot.self, from: Data(contentsOf: URL(fileURLWithPath: Paths.snapshot)))
-            return diagnoseConfiguration(try evaluate(service: service, snapshot: snapshot))
+            return diagnoseConfiguration(try evaluate(service: service, snapshot: snapshot).withSystemUpdate(maintenance))
         } catch {
-            return diagnoseConfiguration(StatusReport(state: "unknown", daemonRunning: serviceRunning, snapshot: nil, reason: "status_unavailable: \(error)"))
+            return diagnoseConfiguration(StatusReport(state: "unknown", daemonRunning: serviceRunning, snapshot: nil, reason: "status_unavailable: \(error)").withSystemUpdate(maintenance))
         }
     }
 
     private static func diagnoseConfiguration(_ report: StatusReport) -> StatusReport {
-        guard ["unknown", "stopped"].contains(report.state),
+        guard report.systemUpdate == nil, ["unknown", "stopped"].contains(report.state),
               (try? RootFiles.verify(Paths.pfConfig)) != nil,
               let file = try? FileHandle(forReadingFrom: URL(fileURLWithPath: Paths.pfConfig)) else { return report }
         defer { try? file.close() }

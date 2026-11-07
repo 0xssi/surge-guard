@@ -38,13 +38,20 @@ final class Daemon {
     var nextEgressSummary: Double = 0
     var egressHistory = EgressHistory()
     var egressFailure = ""
+    var systemUpdate: SystemUpdate?
+    var lastLocalTCPFailure = ""
 
     init() throws {
         lock = try RuntimeLock()
         try RootFiles.preparePublicState()
         try RootFiles.verify(Policy.anchorPath)
-        try firewall.prepareAttachment()
-        try firewall.block()
+        systemUpdate = try SystemUpdate.loadProtectingOnFailure { try firewall.prepareBlocking() }
+        if systemUpdate?.phase == .active {
+            try firewall.suspendForSystemUpdate()
+            firewallVerified = SystemClock.seconds
+            return
+        }
+        try firewall.prepareBlocking()
         firewallVerified = SystemClock.seconds
         EventLog.write("daemon_started", message: "Blocked before checking Surge", details: ["run_id": runID])
     }
@@ -101,9 +108,8 @@ final class Daemon {
 
     func updateSession(_ config: Configuration, force: Bool) {
         let now = SystemClock.seconds
-        if force {
-            invalidateSession()
-        }
+        // Refresh immediately without discarding a still-fresh result; real losses invalidate separately.
+        if force { generation += 1; nextSessionProbe = 0 }
         guard !probing, now >= nextSessionProbe else { return }
         probing = true
         nextSessionProbe = now + 1
@@ -175,6 +181,24 @@ final class Daemon {
     func reconcile(forceFirewallAudit: Bool = false, lossReason: String? = nil, detectedAt: Double? = nil) {
         defer { surgeExitDetectedAt = nil }
         do {
+            systemUpdate = try SystemUpdate.load()
+            if let maintenance = systemUpdate, maintenance.phase == .active {
+                allowed = false
+                if forceFirewallAudit || SystemClock.seconds >= nextFirewallAudit {
+                    nextFirewallAudit = SystemClock.seconds + 5
+                    if try !firewall.systemUpdateSuspended() { try firewall.suspendForSystemUpdate() }
+                    firewallVerified = SystemClock.seconds
+                }
+                if SystemClock.seconds >= nextPublish {
+                    let snapshot = GuardSnapshot(runId: runID, firewallVerifiedUptime: firewallVerified, allowed: false,
+                                                 configurationMode: "maintenance", readiness: nil, session: nil,
+                                                 reasons: ["System update maintenance; all applications may connect directly"],
+                                                 enforcement: "os_update_maintenance", systemUpdateId: maintenance.id)
+                    try RootFiles.write(try JSON.encode(snapshot), to: Paths.snapshot, mode: 0o644)
+                    nextPublish = SystemClock.seconds + 1
+                }
+                return
+            }
             let received = detectedAt ?? SystemClock.seconds
             var loss = try lossReason ?? watchSurgeConnection()
             if loss == nil, try !surgeProcessTrusted() { loss = "surge_process_untrusted_or_ambiguous" }
@@ -187,7 +211,8 @@ final class Daemon {
                 let snapshot = GuardSnapshot(runId: runID, firewallVerifiedUptime: firewallVerified, allowed: false,
                                              configurationMode: configuration?.mode ?? "invalid", readiness: nil,
                                              session: nil, reasons: [loss], enforcement: configuration?.enforcement ?? "surge_readiness_gate",
-                                             lanTcpEnabled: configuration?.allowsLANTCP, lanTcpBindings: firewall.lanTCPBindings)
+                                             lanTcpEnabled: configuration?.allowsLANTCP, lanTcpBindings: firewall.lanTCPBindings,
+                                             systemUpdateId: systemUpdate?.id, usbTcpBindings: firewall.usbTCPBindings)
                 try RootFiles.write(try JSON.encode(snapshot), to: Paths.snapshot, mode: 0o644)
                 EventLog.write("readiness_loss_blocked", level: "warning", message: loss,
                                details: ["run_id": runID, "detected_uptime": received, "pf": "blocked",
@@ -215,24 +240,36 @@ final class Daemon {
             var reasons = observation?.reasons ?? ["readiness_probe_failed: \(probeFailure ?? "unknown error")"]
             if let loss, !reasons.contains(loss) { reasons.append(loss) }
             var config: Configuration?
+            var localBindingsChanged = false
+            var localTCPFailures: [String] = []
             do {
                 config = try Configuration.load()
-                let bindings = try config!.allowsLANTCP ? LANTCP.bindings(addresses: Probe.addresses()) : []
+                let inventory = config!.allowsLANTCP ? LocalTCPInventory() : nil
+                let bindings = inventory?.lan ?? []
+                let usbBindings = inventory?.usb ?? []
+                localTCPFailures = inventory?.errors ?? []
                 let lanChanged = try firewall.setLANTCP(bindings)
-                if configuration != config || lanChanged {
-                    if allowed || lanChanged {
-                        try firewall.block()
-                        allowed = false
+                let usbChanged = try firewall.setUSBTCP(usbBindings)
+                localBindingsChanged = lanChanged || usbChanged
+                if configuration != config || lanChanged || usbChanged {
+                    if configuration != config {
+                        if allowed || localBindingsChanged { try firewall.block(); allowed = false; firewallVerified = SystemClock.seconds }
+                        invalidateSession()
+                    } else if !allowed {
+                        // Revoke only removed local states; an inventory error must not reset the public Surge tunnel.
+                        try firewall.block(clearExistingStates: false)
                         firewallVerified = SystemClock.seconds
                     }
-                    invalidateSession()
                     configuration = config
-                    EventLog.write("configuration_loaded", message: "Validated policy configuration and LAN TCP interfaces",
+                    EventLog.write("configuration_loaded", message: "Validated policy configuration and local TCP interfaces",
                                    details: ["mode": config!.mode, "run_id": runID, "allow_lan_tcp": config!.allowsLANTCP,
-                                             "lan_tcp_bindings": try JSONSerialization.jsonObject(with: Data(JSON.encode(bindings).utf8))])
+                                             "lan_tcp_bindings": try JSONSerialization.jsonObject(with: Data(JSON.encode(bindings).utf8)),
+                                             "usb_tcp_bindings": try JSONSerialization.jsonObject(with: Data(JSON.encode(usbBindings).utf8))])
                 }
             } catch {
-                if try firewall.setLANTCP([]) {
+                let lanRevoked = try firewall.setLANTCP([])
+                let usbRevoked = try firewall.setUSBTCP([])
+                if lanRevoked || usbRevoked {
                     try firewall.block()
                     allowed = false
                     firewallVerified = SystemClock.seconds
@@ -242,6 +279,14 @@ final class Daemon {
                 configuration = nil
                 generation += 1
                 session = nil
+            }
+            let localFailure = localTCPFailures.joined(separator: "; ")
+            if localFailure != lastLocalTCPFailure {
+                EventLog.write(localFailure.isEmpty ? "local_tcp_inventory_recovered" : "local_tcp_inventory_failed",
+                               level: localFailure.isEmpty ? "info" : "warning",
+                               message: localFailure.isEmpty ? "Local TCP interface inventory recovered" : localFailure,
+                               details: ["run_id": runID, "impact": "affected_local_tcp_exceptions_revoked; public_readiness_policy_unchanged"])
+                lastLocalTCPFailure = localFailure
             }
             var egressGroup: UInt32?
             var surgeInterface: String?
@@ -293,7 +338,7 @@ final class Daemon {
                 }
             }
             let ready = reasons.isEmpty && observation?.ready == true && config != nil
-            if ready != allowed {
+            if ready != allowed || (ready && localBindingsChanged) {
                 if ready {
                     try firewall.allow(group: egressGroup, interface: surgeInterface)
                     allowedInterface = surgeInterface
@@ -307,7 +352,9 @@ final class Daemon {
                 let snapshot = GuardSnapshot(runId: runID, firewallVerifiedUptime: firewallVerified, allowed: allowed,
                                              configurationMode: config?.mode ?? "invalid", readiness: observation, session: session, reasons: reasons,
                                              enforcement: config?.enforcement ?? "surge_readiness_gate",
-                                             lanTcpEnabled: config?.allowsLANTCP, lanTcpBindings: firewall.lanTCPBindings)
+                                             lanTcpEnabled: config?.allowsLANTCP, lanTcpBindings: firewall.lanTCPBindings,
+                                             systemUpdateId: systemUpdate?.id, usbTcpBindings: firewall.usbTCPBindings,
+                                             localTcpErrors: localTCPFailures.isEmpty ? nil : localTCPFailures)
                 try RootFiles.write(try JSON.encode(snapshot), to: Paths.snapshot, mode: 0o644)
                 nextPublish = SystemClock.seconds + 1
             }
@@ -327,9 +374,15 @@ final class Daemon {
             }
             if !allowed { firewall.recordBlockedTraffic() }
         } catch {
+            if (try? SystemUpdate.load())?.phase == .active {
+                EventLog.write("system_update_unverified", level: "error", message: "Maintenance remains requested; release not verified: \(error)")
+                try? FileManager.default.removeItem(atPath: Paths.snapshot)
+                exit(1)
+            }
             EventLog.write("reconciliation_failed", level: "error", message: "\(error). Blocking before launchd restart", details: ["run_id": runID])
             do {
                 try firewall.setLANTCP([])
+                try firewall.setUSBTCP([])
                 try firewall.block()
                 EventLog.write("fail_closed", message: "Block rules verified before restart")
             }
@@ -340,6 +393,7 @@ final class Daemon {
     }
 
     func observeEgress() {
+        guard systemUpdate?.phase != .active else { return }
         let now = SystemClock.seconds
         guard !egressSampling, now >= nextEgressSample else { return }
         egressSampling = true
@@ -353,6 +407,7 @@ final class Daemon {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.egressSampling = false
+                guard self.systemUpdate?.phase != .active else { return }
                 switch result {
                 case .failure(let error):
                     let reason = String(describing: error)
@@ -436,9 +491,11 @@ final class Daemon {
             let handler = DispatchSource.makeSignalSource(signal: number, queue: .main)
             handler.setEventHandler { [weak self] in
                 do {
-                    try self?.firewall.block()
+                    let maintenance = (try? SystemUpdate.load())?.phase == .active
+                    if !maintenance { try self?.firewall.block() }
                     try? FileManager.default.removeItem(atPath: Paths.snapshot)
-                    EventLog.write("daemon_stopped", message: "Leaving blocked rules installed")
+                    EventLog.write(maintenance ? "system_update_daemon_stopped" : "daemon_stopped",
+                                   message: maintenance ? "Maintenance remains active across restart; no blocking rules loaded" : "Leaving blocked rules installed")
                 }
                 catch { EventLog.write("pf_unverified", level: "critical", message: "Block on shutdown failed: \(error)"); exit(1) }
                 exit(0)

@@ -22,6 +22,8 @@ Read README.md first. It is the operational contract for all three components.
 - PF updates stay inside `io.github.surge-guard`. Do not globally disable PF,
   flush all state or replace unrelated configuration to simplify recovery.
 - Preserve the existing signature, extension, VIF, route and IPv6 checks.
+  Only explicit dynamic-store NoKey means absent IPv6; read/type/schema errors
+  must never become an absent route or permit readiness.
 - Configured route checks fail closed. Never convert a malformed/missing policy,
   failed CLI query or expired result into enhanced-only success.
 - Omitted allowed_final_policies means exact group matching without a node
@@ -60,6 +62,9 @@ Read README.md first. It is the operational contract for all three components.
   load blocking rules before that query and do not claim verified cleanup on failure.
   Still clear remembered addresses when enumeration fails, and retain them on any
   cleanup failure so retries do not forget old states.
+  Persist the bounded boot-bound address history before allowing traffic; a new
+  daemon must consume it before cleanup. Invalid history remains unverified while
+  current-address cleanup is still attempted.
 - Independent emergency/log actions must not query the guard executable, even
   for help/capabilities. A service-query error is not service absence: refuse
   anchor clearing on unexpected errors or a running job without a valid PID.
@@ -103,11 +108,23 @@ Read README.md first. It is the operational contract for all three components.
 - Optional `allow_lan_tcp` requires `persistent_tcp`; default stays off. Allow
   only IPv4 TCP between actual private local addresses on up `enN` interfaces
   and RFC1918 peers, in both ready and blocked states, with interface-bound state.
-  Keep public/VPN/IPv6 restrictions. Interface/policy changes clear old states;
+  The same opt-in allows link-local IPv6 TCP on up Apple USB NCM interfaces,
+  identified by native driver/vendor inventory, bound to actual local addresses
+  and fe80::/10 peers with interface-bound state. CoreDevice tunnels identified
+  by bounded system inventory allow only their actual ULA address and ULA /64.
+  Adding device bindings preserves carrier states; removing bindings or changing
+  policy still clears old states. Keep public/unrelated-VPN/other IPv6 restrictions;
+  network events audit PF and expedite route refresh without discarding a
+  still-fresh result. Keep the three-second expiry and invalidate on actual
+  readiness loss, policy changes and trusted process changes.
   invalid configuration or enumeration failure revokes the exception. Report its
   effective scope in status/menu/logs. Upgrade running Guard and Gate before
   writing this field; old readers reject it. Do not promise LAN survival through
   startup, upgrades or state cleanup, or add blocked-state UDP/DNS permissions.
+  Optional LAN/USB inventory errors revoke only the affected exception and clear
+  its old local-address/peer states; required readiness failures still block.
+  Network events reject old in-flight query generations without extending the
+  original three-second freshness of completed results.
 - `SurgeGate` supports persistent `update-pause` / `update-resume` (`update-mode.json`)
   acknowledged by nonce + fresh status, plus `start` / `stop` / `restart`. Keep
   30s retry backoff on real launch/quit failures without penalizing post-launch
@@ -142,6 +159,20 @@ Read README.md first. It is the operational contract for all three components.
   the original error and any unverified-block failure. Restoration is not verified
   PF enablement/state cleanup. Installing
   menu files does not enable SwiftBar login startup; verify that separately.
+- Explicit root `os-update-begin` / `os-update-end` maintenance is cross-boot and
+  never expires automatically. Require a fresh exact-nonce Gate acknowledgement
+  before releasing protection; no pending launch or power request may be hidden
+  by that acknowledgement. Preserve Gate's separate Surge update pause and saved
+  session. Keep preparing/active/restoring checkpoints root-owned, bounded and
+  strictly validated. Write the empty own boot anchor before clearing live rules;
+  do not disable PF globally or clear other anchors. Active maintenance must not
+  re-arm on daemon termination/startup. Invalid records fail closed. Ending must
+  restore normal disk/live protection and verify fresh PID/boot/nonce-bound PF
+  status before removing the checkpoint. Block incompatible management commands.
+  Show orange maintenance and all-application direct-access scope, never green
+  protection; intent alone is not verification. Retain offline emergency access.
+  Use snapshot version 2 only for maintenance so version-1 readers cannot mistake
+  empty rules for verified blocking; normal protection remains version 1.
 
 ## Validation and delivery
 

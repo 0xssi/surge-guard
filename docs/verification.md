@@ -1892,8 +1892,8 @@ Apple update catalog/CDN hosts also completed with certificate validation; their
 401/404 responses establish HTTP reachability, not successful update downloads.
 Guard remained allowed with all six readiness conditions passing afterward.
 
-Code review confirms there is no Apple-update exemption or cross-reboot system
-update maintenance mode. Persistent TCP rejects public physical-interface traffic
+Review of the installed runtime at this point confirmed no Apple-update exemption
+or cross-reboot system-update maintenance mode. Persistent TCP rejects public physical-interface traffic
 outside the Surge exceptions; failed readiness or configured route checks load
 blocking rules. Normal daemon termination retains blocking rules, and startup
 blocks before probing Surge. Default attachment recovery repairs post-update
@@ -1902,3 +1902,578 @@ protection but does not remove these update-networking dependencies.
 Not performed: update payload download, preparation/personalization, firmware
 installation, reboot or first-login update completion. These read-only successes
 do not establish uninterrupted networking throughout a system update.
+
+## 2026-10-25 — explicit system-update maintenance source verification
+
+Implemented administrator-authorized `os-update-begin` / `os-update-end`, with
+preparing/active/restoring checkpoints, fresh nonce/boot/process-bound Gate
+acknowledgement, empty own disk/live rules across reboot, and verified normal PF
+restoration before resuming Gate. The original policy, Gate Surge update pause
+and saved session are retained. Added orange status/menu actions, fallback End
+entry, bounded log events, packet-audit maintenance attribution and bilingual
+operating instructions. No dependencies or OS-update process heuristics added.
+
+Performed:
+
+- `./scripts/check.sh`: exit 0, 82 PASS groups, including the C launcher checks
+  and release Gate executable checks; release build with warnings as errors,
+  example validation, CLI help, shell syntax and whitespace checks passed.
+- Maintenance regressions cover strict checkpoint parsing, all phases and
+  persistence without expiry, ownership/mode/link/size/FIFO rejection, repeated
+  descriptor cleanup, exact Gate nonce/PID/boot/freshness, missing legacy
+  acknowledgement, stale and mismatched daemon status, no protected-PF claim
+  from a maintenance snapshot, version-1-reader rejection of maintenance,
+  query-failure metadata, both blocked/allowed
+  restored protection, durable-write-before-rule-clear ordering and injected
+  write/clear/verification failures.
+- Mocked menu tests exercise unsupported installed versions, fixed privileged
+  command delegation, all-application warnings, failure propagation, fallback
+  recovery, and independent emergency/log paths without invoking live sudo/PF.
+- Read-only release CLI JSON and combined menu rendering succeeded against the
+  existing installation. Both new actions reject unprivileged execution. The
+  existing daemon remained allowed with its prior PID, and no system-update
+  checkpoint was created. Original untracked `package-lock.json` was unchanged.
+- `./scripts/install-user.sh --menu-only`: exit 0. Only user menu files were
+  installed. Before/after hashes of the installed Guard and Gate binaries and
+  `package-lock.json` matched; Guard/Gate/Surge process identities were unchanged
+  and Guard remained allowed. The maintenance feature requires subsequent Guard
+  and Gate deployment; menu installation alone does not activate it.
+
+Not performed: installing/restarting the new Guard or Gate, entering maintenance,
+modifying live PF, quitting Surge, OS update/download, reboot, visual/login-menu
+acceptance, or live fault injection.
+The acceptance matrix describes those authorized live checks separately. This
+source verification does not establish uninterrupted OS-update networking or
+successful firmware/personalization/recovery-OS installation.
+
+## 2026-10-25 — originating Mac maintenance-capable runtime deployment
+
+Installed the tested working tree based on c788635, including the pending
+system-update maintenance changes, on the originating Mac. This deployment does
+not refer to a new Git commit. Source diff, added source files, build hashes,
+pre-installation configuration copies and detailed results were retained in a
+private user backup directory; the system installer retained its root rollback
+backup separately.
+
+Performed:
+
+- Confirmed the prior 82-group check run and rebuilt Release with warnings as
+  errors. Existing Guard was allowed, Gate was fresh/ready, all six native
+  conditions passed, and no launch, shutdown or system-maintenance request was
+  pending. Updated and verified the independent recovery menu before elevation.
+- Used the macOS administrator authorization dialog to run the official compiled
+  installer with the existing policy. It waited for normal shutdown/lock release,
+  installed the system helper/launcher, and returned fresh verified allowed
+  status. Installed the staged Gate as the normal user afterward.
+- Both new running services advertise `os_update_v1`. Their PIDs changed; the
+  existing Surge PID did not. Twenty consecutive allowed/ready samples and a
+  subsequent native/configured-routing condition check passed.
+- Read back enabled PF, the first Guard filter attachment, and its VIF,
+  dedicated-group, persistent TCP-block and configured LAN rules. The internal
+  root-to-user Gate-status probe completed and correctly refused an unrelated
+  nonce without creating any maintenance request.
+- Matched installed Guard, Gate, launcher and user renderer hashes to the staged
+  tested build. Launcher `--check` passed; dedicated GID 60000 and root mode 2755
+  were retained, and Surge.app remained owned by the ordinary user. Both service
+  plists retained RunAtLoad and KeepAlive.
+- Verified byte-for-byte preservation of policy, disk PF configuration, Gate
+  configuration, Surge update-pause preference, policy draft, combined SwiftBar
+  plugin and the original untracked package-lock.json. The combined renderer
+  shows allowed/ready and the new Prepare macOS Update action; sent SwiftBar its
+  existing refresh-all URL. Normal protection remains active, with no maintenance
+  checkpoint.
+
+Not performed: entering/ending maintenance against live PF, system update or
+reboot, visual/login-cycle menu acceptance, deliberate fault/rollback injection,
+or packet-by-packet bypass testing. This installation verifies normal operation
+of the new services, not an end-to-end macOS update or maintenance transition.
+
+## 2026-10-27 — dedicated-launch parentage compatibility preflight
+
+Investigated compatibility with third-party DNS conflict handling that selects
+processes using UDP port 53, including remote-port matches, and chooses a direct
+termination path based on whether the process's parent is launchd. Detailed
+machine-specific evidence remains in private local diagnostics.
+
+Performed, without restarting the installed Guard, Gate or Surge:
+
+- Confirmed that persistent mode starts the fixed dedicated-group launcher as a
+  Gate child, and that the installed launcher's `--check` succeeds.
+- Ran a disposable GUI LaunchAgent with `/bin/sleep`. After observing its actual
+  executable, verified parent PID 1 and a separate process group. Confirmed that
+  this user job was absent from the system domain.
+- Ran the existing dedicated-group launcher with `--check` through a separate
+  disposable GUI LaunchAgent. It exited successfully and reported the console
+  user's UID and the reserved dedicated GID; it did not start Surge.
+- Ran a disposable Interactive LaunchAgent whose Foundation `Process` child was
+  a bounded `/bin/sleep`. Normally terminating only the test parent through
+  launchd left the same child PID alive, reparented to PID 1, with its separate
+  process group retained. The child subsequently exited on its own.
+- Removed and verified absence of every disposable job. Private probe files and
+  results were kept outside the repository. Existing runtime identities and
+  fresh Guard/Gate status were checked separately after the preflight.
+
+Not performed: restarting the real Gate to reparent the existing Surge,
+launching Surge through a new LaunchAgent, reconnecting Wi-Fi or a company VPN,
+invoking third-party conflict cleanup, collecting a live signal sender, changing
+DNS/PF policy, or installing a production startup change. No application logic
+was changed, so the build/unit suite was not rerun for this diagnostic work.
+These isolated checks support candidate compatibility approaches; they do not
+establish a completed fix or protection during a live VPN transition. Historical
+signal records still do not identify their sender directly.
+
+## 2026-10-27 — one-shot GUI launchd compatibility fix (source only)
+
+Changed persistent-mode Gate startup to submit the existing fixed dedicated-group
+launcher as a request-specific, one-shot GUI launchd job. No launcher, signature,
+credential, readiness, route, DNS or PF permission change is part of this fix.
+The private staging plist is outside the login LaunchAgents directory. Existing
+valid Surge processes are retained; the new path applies to subsequent launches.
+
+Performed:
+
+- `scripts/check.sh` passed, including the standalone regressions, C launcher
+  checks, release build with warnings as errors, duplicate Gate lock/CLI checks,
+  configuration examples, shell syntax and `git diff --check`.
+- New regressions cover completed submissions with queued/running jobs, active
+  submission fences, observer loss, verified startup of the exact recorded
+  process, PID reuse, legacy pending markers, malformed new fields and
+  reader-bounded publication. Late child observations cannot resurrect a
+  recovered marker; manual recovery cannot discard a recorded submission.
+- Non-child exit observation retains native identity and honest JSON/human
+  evidence without inventing exit codes or signals. Replacement-watch checks
+  reject obsolete callbacks and do not carry prior startup verification forward.
+  Historical direct-child exit-code/signal tests still pass.
+- Explicit debug and release `surge-guard-tests --gate-launchd-check` passed in
+  the GUI session. Each used only a disposable `/bin/sleep` job with the production
+  job properties: native parent PID 1, independent process group, exactly one
+  non-child exit notification and automatic job removal. An exact-nonce manual
+  recovery attempt while the job was still loaded was refused and retained its
+  pending marker. The disposable jobs were removed; these opt-in checks are not
+  part of the ordinary non-mutating check script.
+- Read-only installed status reported Guard allowed and Gate ready. Installed
+  Guard/Gate PIDs remained unchanged. The existing Surge was still a Gate child;
+  this source work did not deploy the new startup path.
+
+Not performed: production installation, normal/signal termination of real Surge,
+real Surge startup through the new job, Gate-crash/queued-launch fault injection,
+Wi-Fi/VPN reconnect replay, invoking third-party DNS conflict handling, or live
+packet/protection testing. No PF/DNS policy or VPN program was changed. Isolated
+job and source tests do not establish completed VPN compatibility. A privileged
+program can still terminate Surge; historical signal-sender attribution remains
+an inference. The new non-child observer cannot obtain exit codes or signals.
+
+## 2026-10-28 — repeated VPN-associated exit and user Gate deployment
+
+Read-only incident inspection found another verified Surge direct child exiting
+with SIGTERM, followed by Gate recovery and a fresh allowed Guard status. The
+installed Gate still used the old direct-child launch path; the previous day's
+one-shot launchd fix had remained source-only. The installed VPN helper matched
+the previously inspected binary. Its activity and concurrent sudo processes were
+again present around the exit, consistent with the prior DNS-conflict/parentage
+mechanism. The signal sender was not directly captured. Machine-specific logs,
+process identities and deployment evidence remain in private local diagnostics.
+
+Performed:
+
+- `scripts/check.sh` passed again without changing application logic. The release
+  opt-in `surge-guard-tests --gate-launchd-check` also passed with a disposable
+  sleep job: PPID 1, independent process group, native exit notification and
+  automatic job removal. No real Surge launch was part of that test.
+- After the user's explicit approval to update Gate while retaining Surge,
+  verified fresh ready/allowed status, dedicated identity, and absence of pending
+  launches, power requests and maintenance. Privately backed up the installed
+  user binary, service plist, configuration, session and update-mode record.
+- Installed the release Gate through its normal unprivileged `install` command.
+  The new service published fresh ready status and the installed binary hash
+  matched the checked release. Gate configuration and update mode were unchanged.
+- The existing Surge retained its PID, recorded start time and independent
+  process group while its parent changed from the old Gate to PID 1. Its dedicated
+  group remained verified. The system Guard PID was unchanged and fresh status
+  remained allowed with persistent TCP enforcement. No pending launch or power
+  request remained. Repeated post-install inspection confirmed those identities
+  and fresh statuses.
+
+Not performed: real Surge termination/restart or startup through the new job,
+company VPN/Wi-Fi reconnection, direct signal-sender capture, live PF/DNS/policy
+changes, or packet-enforcement testing. Retaining an existing Surge does not
+exercise the new real-app startup path or attach its non-child exit observer.
+The deployment and disposable-job checks do not establish completed company VPN
+compatibility or packet-by-packet protection.
+
+## 2026-10-28 — read-only interruption and egress investigation
+
+After a later report of interrupted traffic, inspected the current Guard/Gate
+JSON, process start times, retained private Guard events, unified-log mirrors,
+Surge errors and rolling request metadata, and passive socket samples. The
+existing Surge PID/start time and launchd parentage were retained. Final fresh
+status was Guard allowed and Gate ready with the dedicated identity verified.
+
+The recent event window contained two short blocked/allowed transitions while
+new routing results were pending; both recovered without a Surge restart. PF
+block counters recorded prevented inbound/outbound matches during each
+transition. Separate Surge logs contained a Tailscale control connection closure
+and SSH timeouts. Routing-node changes were also recorded; these observations
+do not establish the precise cause or duration of the user's interruption.
+
+Retained off-VIF socket evidence contained private-LAN TCP and unresolved UDP
+peers, including UDP sending on physical and alternate tunnel interfaces. No
+record with a known public application destination was identified in that
+window. Wildcard peers remain unknown, including sockets using common discovery
+ports; interface/counter observations do not verify packet paths or bypass.
+The current request sample showed the inspected AI-service requests using the
+configured proxy group, but its rolling window does not cover the full incident.
+
+Coverage limits: the packet recorder job was absent and persistently disabled,
+with stale public status; no contemporaneous packet evidence was obtained.
+Passive sampling remained intermittent and had missing counters. One timed-out
+sample and its subsequent recovery were retained. UDP is outside persistent TCP
+enforcement, and configured private-LAN TCP remains permitted. No conclusion of
+zero bypass is supported. Detailed identities, timestamps and raw evidence stay
+in private local diagnostics.
+
+No application logic, policy, PF/DNS configuration, service or recorder state was
+changed, and no target traffic or disruptive replay was generated. Build/unit
+checks were not repeated for this read-only investigation; packet-level bypass
+acceptance and exact application-outage attribution remain unperformed.
+
+## 2026-10-28 — Codex loopback socket routing diagnosis
+
+After the user identified Codex as the application with a socket connection
+failure, recent Surge metadata showed repeated failed requests from its backend
+to a local loopback listener being assigned to a remote proxy group. The local
+Codex listener was present, and a direct TCP connection succeeded without sending
+application data. Guard/Gate status remained fresh allowed/ready, with the same
+Surge process and no new blocking transition in the inspected recent window.
+
+Reproduced the policy distinction through read-only Surge rule evaluation:
+the loopback URL alone selected the LAN DIRECT rule, while the same URL with
+the observed Codex process path selected an earlier Codex process rule and the
+remote proxy group. This establishes a concrete local routing conflict. It does
+not identify the user's exact on-screen error, whose text was not supplied, or
+prove a model-service WebSocket failure had the same cause.
+
+Machine-specific ports, process identities, failed-request metadata and rule
+evaluations remain in private diagnostics. No rule, profile, PF, process or
+service was changed. The proposed correction is loopback DIRECT precedence
+before the Codex process proxy rule; actual profile changes and application
+reconnection acceptance remain unperformed. No logic changed or build reran.
+
+## 2026-10-29 — read-only reboot startup diagnosis
+
+Inspected retained Gate events, Surge startup logs and macOS configuration and
+NetworkExtension logs after an ordered Gate restart. The shutdown retry reached
+the accepted macOS restart request. After login, Gate submitted its dedicated
+one-shot Surge job while the physical network was still undergoing captive
+network evaluation. Although DHCP had published an address, macOS temporarily
+ranked the interface Never. NetworkExtension rejected the first and subsequent
+manual tunnel starts with `No network available` before starting the provider.
+After captive evaluation timed out, macOS restored the interface's Default rank
+and selected it as the primary physical interface. The earlier Surge process
+then exited; Gate submitted a new dedicated job, Enhanced Mode connected, and
+application restoration resumed. Private raw evidence is retained outside Git.
+
+Source inspection confirmed Gate retries absent or incorrectly grouped Surge
+processes, but a correctly grouped running process with failed Enhanced Mode
+startup remains in the waiting path. This explains why exiting the stalled app
+triggered recovery. The observed network-evaluation delay while Guard was
+blocking is consistent with blocked connectivity probes; the inspected logs do
+not independently attribute every failed probe to a specific PF rule.
+
+Fresh installed JSON remained machine-readable and reported Guard allowed with
+persistent TCP enforcement and Gate ready with the dedicated identity verified.
+No application logic, service, PF/DNS policy, Surge preference or network setting
+was changed. Build/unit checks, another reboot, connectivity-probe replay,
+automatic recovery implementation and packet-level protection tests were not
+performed. This diagnosis does not establish a startup fix or no-bypass coverage.
+
+## 2026-10-29 — Gate waits for the native primary network before launch
+
+Added a launch prerequisite in both ordinary and dedicated Surge startup paths:
+macOS must publish a primary IPv4 interface that currently has an up,
+non-loopback IPv4 address. DHCP/interface presence alone cannot release the wait.
+The check occurs before creating a pending launch or submitting work. Existing
+valid Surge instances are retained. Waiting uses the normal service loop and
+does not add a fixed delay, an Internet probe or a failure cooldown. Power and
+update handling remain ahead of startup work. The new `waiting_network` status
+has explicit menu/log wording and permits fresh exact-request update-resume
+acknowledgement, without acknowledging an update pause. Application restoration
+remains subject to fresh verified allowed Guard status and is deferred during
+this network wait. PF permission and Enhanced Mode preferences are unchanged.
+
+Performed:
+
+- `scripts/check.sh` passed: standalone Swift/C checks, warnings-as-errors
+  release build, duplicate-run lock protection, CLI/help rejection, example
+  validation, shell syntax and whitespace checks.
+- New regression cases cover DHCP addresses without a published primary over
+  a simulated prolonged captive evaluation; immediate eligibility once primary
+  publication arrives; missing/wrong/down/loopback/non-IPv4/invalid interfaces;
+  no extra recovery cooldown; non-green wait presentation; honest zero-pending
+  logs and raw JSON preservation; and update pause/resume acknowledgement.
+- A temporary read-only executable linked to the production core successfully
+  called the new native probe on this Mac and confirmed an absent dynamic-store
+  key reports `kSCStatusNoKey`. No network configuration was changed.
+- With fresh ready/allowed service status and no pending launch, power request,
+  update pause or system maintenance, privately backed up the current user
+  binary/menu, LaunchAgent, configuration, session, update record and status.
+  Updated the menu through `install-user.sh --menu-only`, then installed the
+  checked Gate through its normal unprivileged `install` command.
+- The installed Gate and user menu renderer hashes matched the checked release.
+  A new Gate process published fresh ready status with no pending applications
+  or launch/power markers. Guard retained its PID/boot/run identity and fresh
+  allowed status with persistent TCP enforcement. Surge retained its native
+  PID/birth time/process group and verified dedicated credentials. Configuration,
+  update-mode and system-policy hashes were unchanged. Private before/after
+  evidence and rollback files remain outside Git.
+
+Not performed: another reboot/login, real delayed-DHCP/captive-network replay,
+starting or quitting real Surge, live pause/power requests during network wait,
+or packet-level enforcement acceptance. No system daemon replacement, PF/DNS
+policy change or captive-network setting change was performed. The prerequisite
+addresses the observed missing-primary startup failure; it does not guarantee
+that NetworkExtension cannot fail for another reason or that an independently
+started, already-running Surge will be repaired. Build and deployment checks do
+not establish a real reboot pass or no-bypass coverage.
+
+## 2026-11-04 — Bounded merged diagnostics and Surge upgrade guidance
+
+Added a normal-user `diagnose` command with a default 20-minute history window
+and optional 1–300-second passive DNS/QUIC memory-log observation. It merges
+Guard/Gate retained events, up to four Surge log tails and current component
+snapshots. Root is used only by fixed `sudo -n tail` reads of the two private
+Guard event files; the user-owned collector and renderer stay unprivileged.
+Unavailable permissions/files, malformed or undated records, retained ranges,
+tail limits, non-overlapping memory windows and capacity omissions remain explicit.
+There is no inferred root-cause or no-bypass success, and no collection result
+is an input to PF permission.
+
+The report retains at most 1,500 newest entries with a 2 MiB evidence budget
+and a 6 MiB serialized bound. A writer lock rejects overlapping collectors.
+Current/previous reports use the existing owner-validating, pre-permissioned
+atomic writer with mode 0600. Ten-second observation checkpoints retain the
+previous session; `collection_finished: false` distinguishes a checkpoint from
+normal command completion without claiming historical coverage completeness.
+The command performs no external connectivity queries and never enables audit.
+
+Added independent menu actions for merged diagnostics and 120-second observation.
+The menu can authenticate for private reads, and still collects partial evidence
+if authentication is cancelled. Existing Surge update pause/resume controls are
+placed before power actions, labelled as prepare/finish-update, and explain that
+PF stays armed. Guidance after acknowledgement is printed only when Gate returns
+success; resume acknowledgement is not a networking/PF recovery claim. Existing
+nonce/freshness fences, identity checks and 30-second real-failure retry remain.
+
+Performed:
+
+- `scripts/check.sh` passed after the final logic changes: standalone checks,
+  warnings-as-errors release builds, launcher checks, CLI argument/help checks,
+  policy examples, shell syntax and whitespace checks.
+- Focused diagnostic cases cover option bounds/duplicates, numeric/local
+  timestamps, boolean/invalid timestamps, window filtering, raw error/process
+  retention, rotation/poll deduplication, non-overlap gaps, entry/byte limits,
+  unsafe/symlink/FIFO inputs, current/previous private checkpoints and refusal
+  of overlapping CLI writers before any report replacement. Failure JSON stayed
+  machine-readable. Shell fixtures verify diagnostic actions bypass guard help,
+  keep the user renderer unprivileged, allow partial evidence after cancelled
+  authentication and never print upgrade acknowledgement after Gate failure.
+- Ran read-only 20-minute history and a three-second observation on this Mac.
+  Both returned valid bounded JSON and matching saved reports; observation
+  returned automatically with start/end snapshots. Root event-file reads were
+  unavailable without sudo credentials and a predecessor Gate file was absent;
+  these were recorded as gaps, not clean results.
+- Interrupted only an owned diagnostic process after its ten-second checkpoint.
+  The checkpoint remained valid private JSON marked unfinished, and the previous
+  session's report remained intact. No Surge/Gate/Guard process was terminated.
+- Installed the checked user renderer/action/menu through `install-user.sh
+  --menu-only`, retaining its normal user backup. Installed hashes matched the
+  checked artifacts. Verified diagnostic/upgrade and independent recovery menu
+  entries, and that the configured combined plugin references the user menu.
+- Ran the installed merged diagnostic command successfully. Guard/Gate/Surge
+  PIDs and policy, Gate configuration, update-mode, installed daemon and Gate
+  binary hashes remained unchanged. Fresh final status was allowed/ready with
+  persistent TCP enforcement. Reports and local rollback files remain private
+  outside Git; no machine-specific evidence is included here.
+
+Not performed: live sudo-authenticated full root-event collection, a new Surge
+upgrade or live pause/resume request, forced startup failures, network interruption,
+reboot/login, packet recording/replay or packet-level no-bypass verification.
+The system daemon, Gate binary, PF/DNS configuration, recorder state and Surge
+were not replaced or restarted. Diagnostic evidence cannot by itself establish
+the final cause of a QUIC timeout or complete packet coverage.
+
+## Apple USB and CoreDevice TCP exception (2026-11-04)
+
+- Extended the existing local TCP opt-in with native Apple USB NCM/vendor
+  inventory and IPv6 link-local rules. The second-stage CoreDevice tunnel uses
+  bounded system inventory and permits only its actual ULA address and ULA /64.
+  Pure device-binding additions preserve the established carrier connection;
+  removals, invalid inventory/configuration and other policy changes retain the
+  normal blocking and state cleanup behavior.
+- `scripts/check.sh` passed after the final logic change, including focused
+  address/interface/inventory rejection, deduplication, unplug withdrawal,
+  CoreDevice versus unrelated VPN scope, status JSON and native PF syntax checks,
+  the existing regression suite and warnings-as-errors release builds.
+- The first NCM-only revision was installed using the normal backup/update path.
+  Fresh status returned allowed with the original persistent/route policy.
+  Live own-anchor readback confirmed interface-bound IPv6 TCP rules and nonzero
+  NCM rule packet counters. Remote discovery and authenticated pairing recovered.
+  CoreDevice then established its ULA tunnel but timed out on its RSD backend;
+  this exposed the required second-stage exception included in the final build.
+- Updated and verified the independent recovery menu. The local policy and
+  installed Gate executable hashes remained unchanged after the first update.
+
+- Installed the final build through the same backed-up update path. The installed
+  daemon hash matched the checked release artifact and fresh status returned
+  allowed with persistent TCP, original route checks and the new device-binding
+  status field. The recovery menu was updated before deployment. No phone was
+  present in remote discovery at final verification, so final-build CoreDevice
+  install/launch and reconnect were not verified.
+
+Not performed: final-build device install/launch, reconnect, blocked-state and
+reboot acceptance. No iCloud bypass was added; no known iCloud failure was
+reported. Unit tests and syntax checks do not establish packet-level no-bypass
+coverage.
+
+Live installation retry exposed another interruption: creating CoreDevice's
+network service invalidated an otherwise fresh Surge route result, entered
+`rule_probe_pending`, and cleared the carrier states. CoreDevice also changes
+global network state, so service-key filtering alone was insufficient. Network
+events now expedite the route probe without discarding a still-fresh result.
+Actual readiness loss, configuration or trusted process changes still invalidate
+the result; the original three-second expiry and failure handling remain.
+
+After that correction, `scripts/check.sh` passed and the normal updater installed
+the checked release artifact with a matching installed hash and verified allowed
+status. A real `devicectl device install app` then acquired the CoreDevice tunnel
+successfully and reached developer disk-image mounting. Mounting was refused
+with `kAMDMobileImageMounterDeviceLocked`; the phone must be unlocked to finish
+app installation. This confirms tunnel establishment, not completed app install.
+
+After the user unlocked the phone, the real app installation succeeded. A first
+separate launch attempt hit a transient tunnel timeout; the next attempt acquired
+the tunnel and usage assertion, and returned successful application launch.
+This verifies installation and launch on the connected phone, not reconnect,
+reboot, application functional coverage or packet-level no-bypass behavior.
+
+## 2026-11-05 — Successful empty USB NCM inventory
+
+`IOServiceGetMatchingServices` documents a successful null iterator as no matching
+services. The USB inventory previously passed that null handle to
+`IOIteratorIsValid`, reporting `USB NCM devices changed during enumeration`.
+With the local TCP opt-in, this also invalidated daemon configuration rather
+than returning no USB exceptions. The shared inventory now returns an empty set
+only after the native query succeeds with a null iterator. Query errors and
+invalid non-null iterators retain their existing failure behavior.
+
+Performed:
+
+- Reproduced the native successful/null result with no Apple NCM device present,
+  and reproduced the same error with both installed condition-check binaries.
+- Added a native-inventory regression through `USBTCP.bindings(addresses: [])`;
+  it failed with the reported error before the fix and passed afterward on the
+  no-device setup. Existing device/address/PF syntax cases also passed.
+- `scripts/check.sh` passed, including standalone regressions, warnings-as-errors
+  release builds, launcher/CLI checks, examples and shell/whitespace checks.
+- The fixed release `check --json` returned exit zero, valid JSON, ready conditions
+  and empty `usb_tcp_bindings` under the existing policy. This is a condition
+  check, not verified PF protection.
+- Confirmed the Guard launchd job remained absent after emergency exit. The
+  installed system binary and user renderer still differ from the fixed build;
+  no installed binary, service, policy or PF configuration was changed.
+
+Not performed: deployment/re-arming, live PF readback (sudo credentials were
+unavailable), device attach/unplug/reconnect, blocked-state or reboot acceptance,
+and packet enforcement tests. The native regression exercises the current
+hardware inventory; it does not simulate hotplug during enumeration. The original
+installed binaries retain the bug until upgraded.
+
+Authorized follow-up deployment:
+
+- Rechecked the release build with warnings as errors. Installed the user
+  renderer and independent recovery menu as the normal user, retaining the
+  installer's private backup. Verified installed hashes, emergency/log/backup
+  actions and the configured combined plugin's menu invocation before privileged
+  changes.
+- Installed the fixed system binary through the normal backed-up installer while
+  the daemon was unloaded, then explicitly re-armed it with the installed
+  verified restart path. Fresh status returned `allowed` with
+  `persistent_tcp_egress` and empty USB bindings. System/UI hashes matched the
+  checked release build; the new run had no recurrence of the USB inventory error.
+- Authenticated read-only PF queries confirmed PF enabled and the expected
+  interface-bound VIF, dedicated-group, local TCP and TCP-block rules. Original
+  policy and Gate configuration/binary hashes and the Gate service PID were
+  retained. Gate, Surge and the independent packet recorder were not restarted.
+- Performed the requested read-only historical review using authenticated fixed
+  private-log reads and normal-user analysis. Raw evidence and the report remain
+  private outside Git. Socket sampling gaps, unknown UDP peers, recorder absence
+  and partial retained packet scans remain explicit; no no-bypass pass was claimed.
+
+Still not performed: device attach/unplug/reconnect, reboot/login or controlled
+packet-level enforcement acceptance. Successful deployment, PF readback and
+historical event review do not establish complete packet coverage.
+
+## 2026-11-06 — Review fixes, source and non-mutating verification
+
+Rechecked the external review against the current working tree, including its
+uncommitted maintenance, USB, launch and diagnostic work. The IPv6 read-error
+path and corrupt-checkpoint/attachment combination were confirmed. Absence of a
+Surge bootstrap exception alone does not establish the cause of a startup stall:
+the earlier retained diagnosis observed NetworkExtension rejecting startup before
+provider launch while macOS had not published a primary network. No broad
+Surge/DNS/APNs/bootstrap permission was added.
+
+Changes:
+
+- Dynamic-store reads distinguish explicit NoKey from read/type/schema failures.
+  A present empty IPv6 dictionary no longer becomes an absent route.
+- Invalid maintenance reads attempt restoration of the normal boot anchor,
+  supported attachment repair and blocking before reporting the original error.
+  Valid active maintenance does not enter that path. Corrupt checkpoints are
+  retained for administrator repair; explicit CLI unlock remains available.
+- Old-address state-cleanup evidence is persisted privately, bounded to the
+  current boot, 512 addresses and 64 KiB. Replacement firewalls load it before
+  cleanup; failed enumeration/cleanup retains retry evidence. Invalid history
+  remains an error while current-address cleanup is still attempted.
+- Optional LAN and USB inventory failures are isolated and exposed in JSON,
+  menu and failure/recovery events. Removed local exceptions clear the relevant
+  local-address/peer states in both directions, retaining failed cleanup for
+  retry, instead of resetting all public Surge states solely for that failure.
+  Required readiness failures and invalid policy continue to block globally.
+- DHCPv4 renewal permits only local-source root-owned UDP 68 to server UDP 67.
+  No ordinary DNS/UDP exception or extra DHCPv6 unicast assumption was added.
+- User-owned Surge status/URL queries run concurrently after privilege drop,
+  under the three-second outer helper budget. Route age still begins at
+  dispatch; network events reject old in-flight generations without extending
+  completed-result freshness. URL default-context coverage is unchanged.
+- Loaded-but-stopped Start requests a non-forced kickstart. Independent emergency
+  clearing uses fixed system lockf commands with the same management/runtime
+  flock ordering, retains the exit/absence checks and records a macOS system-log
+  result without invoking Guard. It still does not publish the CLI unlock marker;
+  stopped/unknown cached status is explicitly unverified.
+
+Performed:
+
+- `scripts/check.sh` passed with 95 PASS records, standalone Swift/C regressions,
+  warnings-as-errors release builds, duplicate-run lock checks, CLI/help/example
+  validation, shell syntax and whitespace checks. PF checks were parse-only.
+- Added deterministic store error/type/NoKey cases, maintenance failure ordering
+  and original-error retention, boot/history bounds and malformed-address cases,
+  replacement-firewall history consumption, scoped cleanup retry, independent
+  LAN/USB failures, warning JSON/log retention, nine concurrent ordered query
+  results and query failure handling. Recovery fixtures refuse lock contention
+  without running the fake PF command. Native lockf contention against an
+  actual temporary RuntimeLock also passed and retained the lock inode.
+- The built release `check --config examples/enhanced.json --json` returned valid
+  JSON, exit zero and ready conditions. `status --json` returned valid JSON and
+  the existing installed daemon's allowed state. These read-only observations
+  do not validate this source build's live enforcement or deploy its changes.
+
+Not performed: privileged installation, replacing/restarting Guard/Gate/Surge,
+live PF/DNS mutation, real dynamic-store interruption, corrupting the installed
+maintenance/address records, live missing-attachment recovery, device hotplug,
+DHCP renewal/rebind replay, crash/address-reappearance state replay, real
+concurrent emergency/Start, reboot/login, process-specific routing acceptance,
+or packet-level no-bypass testing. Newly added root-owned address journal writes
+and scoped live state removal require authorized deployment/acceptance; unit
+fixtures and native PF parsing do not establish that live behavior.

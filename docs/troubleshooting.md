@@ -3,6 +3,14 @@
 Start with these read-only commands. A successful condition probe is not proof
 that the service/PF is active.
 
+For a merged recent timeline, run the user renderer's `diagnose` command or use
+the menu's **合并检查最近 20 分钟** action. `diagnose --watch-seconds 120` adds a
+bounded passive DNS/QUIC memory-log observation; it neither enables recording nor
+changes DNS/PF. See README for limits and private report paths. Prefer the full
+private event files over truncated unified-log messages. Unavailable files,
+non-overlapping memory windows and retained-time limits remain evidence gaps.
+The diagnostic report deliberately leaves the final root cause undetermined.
+
 ```sh
 /Library/PrivilegedHelperTools/surge-guard status --json
 /Library/PrivilegedHelperTools/surge-guard doctor

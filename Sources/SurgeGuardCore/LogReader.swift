@@ -60,7 +60,16 @@ public enum LogReader {
         let permissionDenied = (details["reason"] as? String ?? message).contains("Permission denied") ||
             (details["reason"] as? String ?? message).contains("permission to view")
         let titles = ["daemon_started": "守护启动", "daemon_stopped": "守护停止，保留阻断",
+                      "system_update_preparing": "准备系统更新维护，等待 Gate 确认",
+                      "system_update_active": "系统更新维护已验证，全部应用保护暂停",
+                      "system_update_restoring": "正在结束系统更新维护并恢复保护",
+                      "system_update_completed": "系统更新维护结束，保护已验证恢复",
+                      "system_update_unverified": "系统更新维护解除规则尚未验证",
+                      "system_update_daemon_stopped": "守护退出，跨重启系统更新维护继续",
+                      "system_update_paused": "系统更新维护：Gate 自动操作已暂停",
                       "route_decision_changed": "分流结果变化", "configuration_loaded": "配置已加载",
+                      "local_tcp_inventory_failed": "本地 TCP 例外枚举失败",
+                      "local_tcp_inventory_recovered": "本地 TCP 例外枚举已恢复",
                       "configuration_installed": "配置已应用", "rule_probe_failed": "分流查询失败",
                       "pf_reconciled": "PF 规则已重新校验", "pf_unverified": "无法确认防火墙保护",
                       "manual_unlock": "已手动解除保护", "restart_requested": "已请求正常重启",
@@ -74,10 +83,14 @@ public enum LogReader {
                       "application_already_running": "应用已在运行，无需重新启动", "surge_launch_requested": "已请求启动 Surge",
                       "surge_child_started": "专用 Surge 启动器子进程已创建",
                       "surge_child_exited": "专用 Surge 子进程已退出",
+                      "surge_job_submitted": "已提交一次性 Surge 启动任务",
+                      "surge_job_process_observed": "已观察到 launchd 启动的 Surge／启动器进程",
+                      "surge_job_process_exited": "launchd 启动的 Surge／启动器进程已退出",
                       "surge_quit_requested": "Gate 请求 Surge 正常退出", "surge_quit_result": "Surge 退出请求返回",
                       "surge_exit_observation_scope": "Surge 退出状态的记录范围",
                       "gate_state": "应用门禁状态变化", "gate_ready": "应用门禁已就绪",
                       "gate_restore_progress": "正在恢复应用", "gate_waiting": "等待系统门禁放行",
+                      "gate_waiting_network": "等待 macOS 主网络后启动 Surge",
                       "gate_status_unavailable": "系统门禁状态暂不可读", "gate_status_recovered": "系统门禁状态读取已恢复",
                       "gate_error": "应用门禁异常", "readiness_loss_blocked": "接管失效，优先阻断已验证",
                       "update_paused": "Surge 更新暂停：自动启动、身份修复和应用恢复已暂停",
@@ -128,6 +141,16 @@ public enum LogReader {
             lines.append(permissionDenied ? "  原因：读取 status.json 时权限被拒绝（EACCES/13）" : serviceQueryFailed ? "  原因：无法查询系统守护进程状态" : "  原因：无法取得近期有效的系统门禁状态")
             lines.append("  影响：应用恢复暂停；这条日志本身不能判定网络已断开")
             lines.append("  处理：待读取恢复后继续；持续出现时查看完整诊断")
+        } else if event == "local_tcp_inventory_failed" || event == "local_tcp_inventory_recovered" {
+            lines.append(event == "local_tcp_inventory_failed" ? "  影响：已撤销枚举失败的本地 TCP 例外；公网放行仍由原有 Surge 与分流检查决定" : "  状态：本地 TCP 例外已按当前接口重新计算")
+            if event == "local_tcp_inventory_failed" {
+                lines.append("  原因：\(text(message))")
+                lines.append("  处理：自动重试接口枚举；持续失败时查看诊断")
+            }
+        } else if event == "gate_waiting_network" {
+            lines.append("  原因：macOS 尚未发布可用的 IPv4 主网络，可能仍在等待 DHCP 或联网认证检测")
+            lines.append("  影响：暂不启动 Surge，应用恢复暂停；主网络就绪不代表系统门禁已放行")
+            lines.append("  处理：主网络就绪后自动启动 Surge；持续等待时检查 Wi-Fi／以太网连接")
         } else if event == "gate_status_recovered" {
             lines.append(details["guard_state"] as? String == "allowed" ? "  状态：系统门禁读取已恢复，可以继续恢复应用" : "  状态：系统门禁读取已恢复，当前未放行，应用恢复仍暂停")
         } else if event == "gate_waiting" || (event == "gate_state" && ["blocked:", "stopped:", "unlocked:"].contains(where: { message.hasPrefix($0) })) {
@@ -144,6 +167,14 @@ public enum LogReader {
             lines.append("  结果：沿用正在运行的应用，本次没有发送启动请求")
         } else if event == "application_restored" {
             lines.append(record["component"] == nil ? "  结果：应用恢复步骤已完成（旧版事件不能区分原本已运行的应用）" : "  结果：已完成应用启动请求")
+        } else if event == "surge_job_submitted" {
+            lines.append("  状态：已提交用户级一次性任务，尚未验证 Surge 身份或联网条件；提交命令结束不代表应用启动结束")
+        } else if event == "surge_job_process_observed" || event == "surge_job_process_exited" {
+            lines.append("  进程：PID \(text(details["child_pid"]))；父进程为 launchd，非 Gate 子进程")
+            if event == "surge_job_process_exited" {
+                lines.append(details["startup_verified"] as? Bool == true ? "  阶段：Gate 曾验证此进程的 Surge 启动身份" : "  阶段：尚未验证 Surge 启动身份，可能仍是启动器")
+                lines.append("  退出方式：非子进程，Gate 无法取得退出码、终止信号或发送者；观察时间不代表精确退出时间或网络状态")
+            } else { lines.append("  状态：已开始跟踪退出，尚未验证 Surge 启动身份或联网条件") }
         } else if event == "surge_child_exited" {
             lines.append("  进程：PID \(text(details["child_pid"]))")
             lines.append(details["startup_verified"] as? Bool == true ? "  阶段：Gate 曾验证此子进程为就绪的 Surge 启动身份" :
@@ -168,7 +199,9 @@ public enum LogReader {
         } else if event == "surge_child_started" {
             lines.append("  进程：PID \(text(details["child_pid"]))；已挂接退出回调，尚未验证 Surge 启动身份或联网条件")
         } else if event == "surge_exit_observation_scope" {
-            lines.append("  范围：仅记录本轮 Gate 通过专用启动器创建的子进程退出状态")
+            lines.append(details["launch_method"] as? String == "launchd_once" ?
+                "  范围：跟踪本轮观察到的一次性 launchd 启动进程退出，无法取得退出码或信号" :
+                "  范围：仅记录本轮 Gate 通过专用启动器创建的子进程退出状态（旧版直接启动）")
             lines.append("  缺口：Gate 启动前已存在的 Surge、NSWorkspace 启动及 Gate 停止后的退出，不在此范围内")
         } else if event == "readiness_loss_blocked" {
             lines.append("  原因：\(reason(message))")
@@ -291,7 +324,7 @@ public enum LogReader {
             if message != "allowed" { lines.append("  原因：\(reason(message))") }
         } else if !message.isEmpty && message != "allowed" { lines.append("  说明：\(reason(message))") }
         if details["allow_lan_tcp"] as? Bool == true {
-            lines.append("  例外：已配置的私网 TCP 仍可经匹配的 Wi-Fi／有线网卡直连")
+            lines.append("  例外：已配置的私网 TCP 仍可经匹配的 Wi-Fi／有线网卡直连；Apple USB 链路本地 IPv6 TCP 也在本地例外范围内")
         }
         if let pending { lines.append("  恢复进度：剩余 \(pending) 个应用") }
         if let elapsed = details["exit_event_to_block_verified_ms"] as? Double {

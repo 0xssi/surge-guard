@@ -54,6 +54,33 @@ SwiftBar 单独提供状态、留存时间范围、预览、日志和启停入�
 抓包运行与完整归属验证是两件事，未知包不能直接判为绕过；环形覆盖之前的历史不可还原。
 详细安装、权限、保留范围和局限见 [包级审计说明](docs/packet-audit.md)。
 
+## 合并诊断与短时取证
+
+更新用户菜单后，可选“合并检查最近 20 分钟”或“120 秒 DNS／QUIC 诊断”。普通用户也可运行：
+
+```sh
+"$HOME/Library/Application Support/SurgeGuard/bin/surge-guard-ui" diagnose
+"$HOME/Library/Application Support/SurgeGuard/bin/surge-guard-ui" diagnose --minutes 20 --watch-seconds 120 --json
+```
+
+菜单中的认证仅用于固定命令读取 root 私有事件文件；取消认证仍会生成标明缺口的部分报告。
+直接命令不会弹出认证，没有可用 sudo 凭据时记录读取失败。收集与格式化始终以普通用户执行，
+不修改 PF、DNS、Surge、Gate 或抓包器状态，也不发起外网连通性测试。
+
+报告合并当前状态、两份 Guard/Gate 事件文件和最多四份 Surge 日志尾部。短时观察每两秒
+查询最多 2,000 行内存日志，仅保留 DNS／QUIC／UDP socket 上下文；最多运行 300 秒。
+最多保留 1,500 条最新记录、2 MiB 证据预算，序列化上限 6 MiB；文字显示最后 80 条。
+`diagnostic-report.json` 及上一份 `.json.1` 保存于用户 SurgeGuard 状态目录，权限 `0600`。
+观察中每十秒写检查点，保留上一轮报告；中断可能丢失最后一个检查点后的记录。
+检查点标记 `collection_finished: false`；正常完成才设为 true，该字段不代表历史覆盖完整。
+报告含本机地址、路径和域名，不要公开或提交。权限不足、日志截尾、时间范围、格式损坏、
+内存窗口不重叠和容量省略都保留标记；可见时间范围不证明连续覆盖。
+报告不会自动宣布根因或“无逃逸”。需要包级证据时另行启用现有独立审计器，诊断不会自动开启抓包。
+
+此功能只需 `scripts/install-user.sh --menu-only`，不替换或重启 Guard/Gate/Surge。
+“准备升级 Surge”与“升级结束并恢复 Surge”继续使用已有的暂停/恢复握手；收到 Gate 确认
+后才显示成功，恢复自动操作仍需等待菜单中的增强模式和 PF 验证。原有 30 秒失败退避保留。
+
 ## 可选的常驻 TCP 限制
 
 可选的常驻 TCP 模式使用 `"persistent_tcp": true`，须先升级系统守护、专用启动器和
@@ -79,14 +106,27 @@ IPv6 的 VIF 例外，也不提供 Tailscale、其他 VPN 或普通用户身份�
 
 例外仅允许：本机已启用的 `enN` 有线／Wi-Fi 网卡的实际私网 IPv4 地址，与
 `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16` 对端之间的入站和出站 TCP。
-规则同时限定本机地址、接口和连接状态，不放开公网、VPN／网桥、IPv6、链路本地地址
+规则同时限定本机地址、接口和连接状态，不放开公网、VPN／网桥、通用 IPv6
 或 CGNAT。允许通过局域网路由器访问其他私网段，不限于当前直连子网；不授权本机转发流量。
 
+同一选项也放行 **Apple USB NCM 接口上的 IPv6 链路本地 TCP**，用于 iPhone／iPad
+有线开发连接。通过原生 IOKit 识别 Apple 厂商及 NCM 驱动，只接受已启用接口上的实际
+`fe80::/10` 地址，规则限定接口、本机地址、对端 `fe80::/10` 和接口绑定的连接状态。
+CoreDevice 创建的第二层 `utunN` 开发隧道也允许其实际 ULA 地址与自身 ULA /64 内的 TCP；
+通过有界的系统 `remotectl dumpstate` 清单识别，不放行其他 VPN。新增开发隧道时保留已有
+USB 承载连接；撤销例外或其他策略变化仍阻断并清理旧连接。
+插拔后动态识别网卡名；枚举失败时撤销例外。不放开 Wi-Fi、公网 IPv6，
+也不增加通用 iCloud 或 Apple 服务绕过。
+
 Surge 或分流检查未就绪时仍保留局域网 TCP，方便 SSH／文件共享和本地排障。
-网卡或地址变化会重载并清理旧连接；配置无效或网卡枚举失败时撤销例外并阻断。
+网卡或地址变化会重载并清理对应本地地址／对端的旧连接。USB 可选枚举失败只撤销 USB
+例外，保留已验证的 LAN 范围；LAN 可选枚举失败同理。`local_tcp_errors` 和菜单会显示
+警告，不把有效公网策略误报成配置无效。必要的接管／地址探测失败仍整体阻断；
+配置无效会撤销两类例外并阻断。
 开机、升级及状态清理仍可能短暂打断局域网连接，不能将它当作独立的带外恢复通道。
 此选项不增加阻断状态下的 UDP DNS／mDNS 放行，排障时可能需要直接使用 IP。
-`status --json` 的 `snapshot.lan_tcp_enabled` 和 `lan_tcp_bindings`、菜单均显示有效范围。
+`status --json` 的 `snapshot.lan_tcp_enabled`、`lan_tcp_bindings`、`usb_tcp_bindings`
+和菜单均显示有效范围。
 
 启用后，“已阻断”指例外范围以外的网络；公网 TCP 和现有就绪／域名检查保持限制。
 允许的局域网设备可能继续代理流量，因此不能声称所有连接都经过 Surge。被 Surge 接管的
@@ -100,10 +140,12 @@ Surge 或分流检查未就绪时仍保留局域网 TCP，方便 SSH／文件共
 
 暂停保存在私有 `update-mode.json`，跨 Gate 重启和电脑重启保留；损坏或读失败时暂停
 自动操作并报告错误。确认超时仍保留请求，不能开始更新。已有退出/启动操作须完成后才
-确认暂停；暂停期间拒绝有序关机请求。启动超时不会取消 NSWorkspace 请求或专用启动器，
-`pending-launch.json` 记录发起请求的 Gate 实例，以及专用启动器的 PID 和出生时间。
-Gate 重启后，确认应用启动即可结束等待；已记录的启动器退出或 PID 被复用时，按失败处理并
-退避 30 秒后恢复。仍存活的启动器或尚未结束的回调继续阻止暂停确认。
+确认暂停；暂停期间拒绝有序关机请求。启动超时不会取消 NSWorkspace 请求或 launchd 提交。
+`pending-launch.json` 记录 Gate 实例和请求对应的任务标识，并分开保存 launchctl 提交进程与
+实际启动器／Surge 的 PID 和出生时间。仍在排队的任务、存活的提交进程、未验证的启动器或
+尚未结束的回调继续阻止暂停确认；提交命令结束不代表 Surge 启动完成。Gate 重启后，须验证
+对应任务进程的 Surge 身份；任务已不存在且已记录的提交进程／子进程退出或 PID 被复用时，
+按失败处理并退避 30 秒后恢复。兼容旧的直接子进程记录；未决启动期间不要降级 Gate。
 
 若 Gate 在保存子进程身份之前崩溃，或丢失了 NSWorkspace 回调，仅凭应用没有出现无法确认
 请求已取消。Gate 会显示 `launch_recovery_required`，给出应用和请求 ID。独立确认旧启动
@@ -141,6 +183,13 @@ Gate 重启后，确认应用启动即可结束等待；已记录的启动器退
 窗口，以及同用户恶意进程对应用包的写入，不属于当前启动器能完全防御的边界。
 SurgeGate 会在确认阻断后，以正常退出方式纠正 Surge 的错误启动身份，再调用启动器；
 退出被拒绝或超时就保持错误状态，不强制终止，也不退回普通身份放行。
+
+每次专用启动都使用当前用户 GUI 域中的独立一次性 launchd 任务，启动器和 Surge 的父进程
+因此为 launchd，而不是 Gate。这避免触发某些 VPN 客户端按父 PID 处理 DNS 端口冲突的
+直接终止分支，但不能阻止管理员或其他特权程序终止 Surge。任务不自动重启，进程退出后
+自动移除；私有暂存 plist 放在状态目录中，不放进 `~/Library/LaunchAgents`，不会独立随登录
+启动。已有的有效 Surge 继续沿用；部署新 Gate 不会改变已有进程的父进程，新路径用于下次
+专用启动。
 
 目前专用启动器只控制经过它的启动，不能强制 Finder、Dock 或更新器独立启动的实例
 从第一刻就使用专用组。检测后重启属于恢复机制；若要求所有入口、包括更新后的第一次
@@ -194,6 +243,8 @@ scripts/check.sh
 
 默认必须通过六项：Surge 官方签名进程、主服务属于 Surge、扩展已连接、VIF 已启用且地址
 正确、IPv4 默认路由指向 VIF、没有冲突的全局 IPv6 主接口。不固定 utun 编号。
+只有动态存储明确返回 NoKey 才视为没有全局 IPv6 路由；读取错误、类型错误、存在但
+缺少有效主接口的字典均不能放行。
 
 需要分流条件时，复制通用示例，填写目标机器上的真实值：
 
@@ -225,6 +276,8 @@ cp examples/routes.json policy.local.json
 缺失 selected、未解析组或未知最终类型均保持阻断。
 不会根据名称中“包含美国”等文字猜测节点属性，也不进行出口 IP 或网站连通性探测。
 配置 URL 使用默认请求上下文；实际应用的进程、协议或 URL 特定规则可能影响结果。
+状态与各 URL 查询并发执行，helper 总时限为三秒；结果仍从查询派发时起三秒过期，
+不因查询慢而延长。网络事件会拒绝旧代际的在途结果，已完成结果只保留到原有效期。
 
 本机策略和状态文件可供普通用户读取，禁止在 URL、查询参数或策略名称中放入秘密。
 最多八条检查；未知配置字段、带凭据或包含原始控制字符的 URL 会被拒绝。
@@ -293,16 +346,76 @@ PF 启用、旧连接清理及正常核验完成前，不发布已验证放行�
 挂载准备失败时先尝试正常阻断，再报告原始错误，避免旧 live anchor 仍处于放行而直接退出；
 若阻断也失败，会明确报告保护未经验证。
 菜单提示磁盘挂载缺失不等于 live PF 已阻断；没有额外监视器启动已卸载或禁用的守护，
-手动 `unlock` 仍保持启动／下次开机恢复的语义。
+未进入系统更新维护时，手动 `unlock` 仍保持启动／下次开机恢复的语义。
+旧的非回环地址保存在私有、绑定本次开机的 `addresses.json` 中，最多 512 个地址／64 KiB。
+守护重启后先读取再清理旧 states；枚举或清理失败保留重试依据。记录损坏时不声称保护
+已验证，仍尝试清理当前可枚举地址的 states。
 
-这是正常已安装系统中的恢复，不是跨重启的系统更新维护模式，也不保证所有版本的升级
-兼容性。系统更新在普通系统内运行时仍可能需要网络；`update-pause` 只暂停 Gate 自动
-重开 Surge，不豁免更新流量。升级后应复查 Guard/Gate 新鲜状态和菜单，保留开机早期边界。
+上述挂载修复负责在正常已安装系统中恢复保护，与下面的系统更新维护模式分别处理，
+不保证所有安装器环境兼容。系统更新在普通系统内运行时仍可能需要网络；
+Gate 的 `update-pause` 本身不豁免更新流量。
+
+### macOS 系统更新维护
+
+使用前先升级 **Guard 和 Gate 两个组件**，并安装独立离线恢复菜单。
+在 SwiftBar 点击 **「准备更新 macOS」**，或运行：
+
+```sh
+sudo /Library/PrivilegedHelperTools/surge-guard os-update-begin
+```
+
+这是管理员明确授权的 **跨重启暂停全部应用的 SurgeGuard 网络保护**。
+所有应用都可能直接访问公网，并非仅放行 Apple 更新。操作不会退出 Surge，
+也不保证网络一定可用；建议先关闭无关的敏感应用。菜单持续显示橙色和维护时长。
+
+准备阶段先保存私密版本／配置备份，再等待当前桌面用户的新版 Gate 以本次请求编号、
+当前开机和进程绑定的新鲜状态确认暂停。未结束的启动、待确认的遗留启动、排队或进行中的
+电源操作、旧版或已停止的 Gate 都会阻止确认；处理后重试，或用 `os-update-end` 取消准备。
+确认前不会解除保护。确认后，Gate 暂停自动重开 Surge、身份修复、应用恢复和周期会话快照；
+已有会话和独立的 Surge `update-pause` 偏好保留。
+
+仅清空本工具的磁盘 anchor 与 live 规则，保留其他 PF anchor、NAT、PF 全局启用状态和
+原策略配置。守护继续核验自身规则为空，重启后也遵守维护状态；`status --json` 返回
+`maintenance`，不显示已验证放行／阻断，也不宣称保护生效。
+维护快照使用版本 2，旧读取器会显示待验证，避免误报阻断；正常保护仍使用版本 1。
+root 所有的 `/Library/Application Support/SurgeGuard/system-update.json` 记录
+`preparing`、`active` 或 `restoring`。请求已保存不代表解除或恢复已经成功；
+必须看到 **VERIFIED MAINTENANCE** 后再用 macOS 自身入口开始更新，
+不要用 Gate 的有序关机／重启替代安装器的重启流程。
+
+维护 **不会因超时、守护重启或电脑重启自动结束**。更新完成或取消后，点击
+**「结束维护并恢复保护」**，或运行：
+
+```sh
+sudo /Library/PrivilegedHelperTools/surge-guard os-update-end
+/Library/PrivilegedHelperTools/surge-guard status --json
+```
+
+结束操作也能取消未完成的准备。它恢复开机阻断 anchor，按已有严格条件修复缺失挂载、
+清理旧连接，并等待新鲜的正常 PF 保护核验通过，再删除维护记录，让 Gate 恢复工作。
+`blocked` 代表阻断保护恢复成功，不代表已经联网；仍须通过 Surge 和所有原策略检查。
+原有 Surge 更新暂停偏好仍保持暂停，须单独执行 `update-resume`。
+恢复保护时已有连接可能重置。
+
+失败会保留记录，应重试，不要通过删除记录强行结束。准备／维护阶段可重试
+`os-update-begin`，或结束／取消；恢复一旦开始则重试 `os-update-end`。
+记录存在时拒绝 Guard 的普通启动、重启、安装、改配置和回滚，避免绕开维护状态。
+状态、日志和独立应急解除规则仍可离线使用。应急解除不会清除维护记录，
+之后仍须 `os-update-end`，电脑重启也不会代为结束。
+菜单渲染器损坏时保留结束维护入口；特权程序损坏时仍可使用独立应急解除规则入口。
+维护记录损坏时，守护启动和 `os-update-end` 会先尝试恢复阻断启动 anchor、修复支持的
+attachment 并阻断，再报告原始错误。损坏记录保留待管理员修复，阻断成功不等于维护
+已结束。CLI `unlock` 在记录存在或不可读时仍可显式使用。
+
+更新后复查 Guard/Gate 新鲜状态、菜单及 SwiftBar 登录启动。
+单元测试不能证明真实安装、固件／个性化阶段、恢复系统兼容性或开机早期覆盖，
+相关场景须按验收文档另行授权测试。
 
 “恢复与备份”提供：正常重启并等待验证、启动／恢复保护、备份当前版本与配置、恢复上一版、
 恢复上一次规则，以及应急解除阻断。管理员操作在终端显示影响、授权和结果，不再使用
 `kickstart -k` 强杀。应急入口独立于守护程序和策略，先等待旧 PID 退出，再清除此工具的
-anchor；不会全局关闭 PF。**应急解除会关闭本工具的保护，启动守护或下次开机才恢复。**
+anchor；不会全局关闭 PF。**应急解除会关闭本工具的保护；普通状态下启动守护或下次开机恢复，
+系统更新维护期间则必须显式结束维护。**
 
 ```sh
 sudo /Library/PrivilegedHelperTools/surge-guard backup
@@ -319,6 +432,8 @@ sudo /Library/PrivilegedHelperTools/surge-guard restore-policy
 ```
 
 该脚本验证服务状态与 PID，等待旧进程退出并再次确认服务已卸载，再清空自身 anchor。
+清空操作持有管理锁和运行锁，避免与并发启动或守护最终阻断竞争，并记录 macOS 系统
+日志。独立入口不发布 CLI 的 unlocked 标记；菜单 stopped／unknown 不代表实时 PF 结论。
 不能把 `bootout` 返回视为进程退出；查询失败时会中止，不执行清空规则。
 
 系统备份位于 `/private/var/db/surge-guard/backups/<id>`，仅 root 可读。
@@ -360,6 +475,13 @@ scripts/install-user.sh --menu-only
 
 SurgeGate 本轮已改为同包 Swift 程序，无需 Python。它只相信近期有效的系统守护状态，
 不会使用“代理端口通＋任意 utun”的备用判定。启动 Surge 后等待就绪，不自动更改增强模式偏好或分流选择。
+
+每次新启动 Surge 前，Gate 会等待 macOS 发布 IPv4 主网络，并确认对应接口已启用且具有非回环 IPv4 地址。
+仅拿到 DHCP 地址还不够：开机联网认证检测可能暂不发布主网络，导致 NetworkExtension 以
+`No network available` 拒绝启动。此时状态为 `waiting_network`，菜单显示“等待 macOS 主网络就绪”；
+Gate 按正常循环复查，不加固定延时、不探测互联网，也不计入启动失败的 30 秒退避。暂停和有序关机仍可处理。
+已有的有效 Surge 实例会保留，不会仅因门禁未就绪就重启它或强制打开增强模式。
+主网络检查只决定何时启动 Surge；PF 放行和应用恢复仍须通过原有系统守护验证。
 
 应用设置位于 `~/Library/Application Support/SurgeGuard/gate.json`，参照 `examples/gate.json`：
 
@@ -420,25 +542,28 @@ sudo /Library/PrivilegedHelperTools/surge-guard logs --json
 SurgeGate 区分“应用原本已运行”和“发送了启动请求”，并分别记录“状态暂不可读”和“状态已恢复”。
 一次状态文件读取失败会暂停应用恢复，不能单凭这一条认定整机断网。
 
-Gate 为本轮通过专用启动器创建的子进程记录 `surge_child_started` 和 `surge_child_exited`。
-退出记录保留启动 ID、子进程 PID、可取得的原生出生时间、是否验证过该进程的 Surge 启动身份、
-退出码或未处理信号，以及收到退出回调的墙钟／单调时间。启动器早期失败不冒充已验证的 Surge
-退出；缺失的出生时间明确标注。Gate 事件同时保留本轮运行 ID 和毫秒时间。
+Gate 为一次性专用启动任务记录 `surge_job_submitted`、`surge_job_process_observed` 和
+`surge_job_process_exited`，保留启动 ID、实际进程 PID、原生出生时间、是否验证过 Surge 身份、
+以及收到退出回调的墙钟／单调时间。Gate 不再是父进程，只能观察退出，无法取得该进程的
+退出码、终止信号或发送者。launchctl 提交命令结束不等于 Surge 退出。历史直接启动产生的
+`surge_child_started`／`surge_child_exited` 仍按原始退出码／信号显示；启动器早期失败不冒充
+已验证的 Surge 退出。Gate 事件同时保留本轮运行 ID 和毫秒时间。
 `surge_quit_requested` 在正常退出调用前记录身份修复、有序关机或重启的原因；
 `surge_quit_result` 只表示请求是否接受，不能据此认定进程已经退出。
 
 这些记录沿用私有轮转日志，用 `surge-gate logs --json` 读取。退出码 0 不证明是用户主动退出，
 终止信号也不包含发送者；回调时间不是精确退出时间或网络保护耗时。
-`surge_exit_observation_scope` 提示覆盖缺口：Gate 启动前已有的 Surge、NSWorkspace 启动的进程、
-以及 Gate 停止后的退出，没有这类子进程退出状态。仅更新源码或菜单不会让运行中的服务启用此功能，
-需在维护窗口部署 Gate 新二进制。
+`surge_exit_observation_scope` 提示覆盖缺口：Gate 启动前已有且无未决任务记录的 Surge、
+NSWorkspace 启动的进程以及 Gate 停止后的退出，不在本观察器的覆盖范围。仅更新源码或菜单
+不会改变运行中的服务，需在维护窗口部署 Gate 新二进制，并验收下次专用启动。
 
 SwiftBar 的系统日志入口只用 sudo 读取固定日志文件，再交给普通用户的 `format-logs` 格式化；
 旧记录也能按新格式显示，不放宽原日志权限，也不以 root 执行用户目录中的渲染程序。
 状态文件先在临时文件上设置好最终权限，再原子替换，消除重写时短暂不可读的权限窗口。
 `status --json` 正常生成报告时退出码为 0，要读取 `state`，不能只看退出码。
 `check --json` 的退出码 0 表示条件通过，1 表示未通过／错误。
-JSON 使用 snake_case，状态有 allowed、blocked、unlocked、stopped、unknown。
+JSON 使用 snake_case，状态有 allowed、blocked、unlocked、stopped、unknown、maintenance。
+维护记录在可选 `system_update` 字段中；`maintenance` 只确认主动暂停保护，不代表保护生效。
 
 状态绑定本次开机和 PID，检查及 PF 审计超过 8 秒过期；分流结果从查询开始计时，3 秒过期。
 守护约每 0.5 秒检查增强模式、1 秒查询分流、5 秒审计 PF；这些不是断网延迟上限。
