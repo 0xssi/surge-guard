@@ -136,4 +136,96 @@ func systemUpdateTests() throws {
                   "Maintenance skipped durable ordering or continued after failure")
     }
     print("PASS: maintenance writes boot rules before live release and never accepts failed verification")
+    try systemUpdateRestorationTests()
+}
+
+func systemUpdateRestorationTests() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("maintenance-restore-" + UUID().uuidString)
+    try UserPaths.prepare(directory.path)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let path = directory.appendingPathComponent("runtime.lock").path
+    func acquire() throws -> RuntimeLock {
+        try RuntimeLock(taking: open(path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600), timeout: 0.25)
+    }
+    func requireHeld() throws {
+        let contender = open(path, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+        guard contender >= 0 else { throw GuardError("Cannot open restoration lock fixture") }
+        defer { close(contender) }
+        try check(flock(contender, LOCK_EX | LOCK_NB) != 0 && (errno == EWOULDBLOCK || errno == EAGAIN),
+                  "Restoration checkpoint/PF work ran without the runtime lock")
+    }
+    var record = SystemUpdate(userID: 501, backupID: UUID().uuidString); record.phase = .active
+    let original = record
+    var steps: [String] = []
+    do {
+        let child = Process(), input = Pipe(), output = Pipe()
+        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        child.arguments = ["--hold-runtime-lock", path]
+        child.standardInput = input; child.standardOutput = output; child.standardError = FileHandle.nullDevice
+        defer {
+            for handle in [input.fileHandleForReading, input.fileHandleForWriting, output.fileHandleForReading, output.fileHandleForWriting] { try? handle.close() }
+        }
+        try child.run()
+        let watchdog = DispatchWorkItem { fputs("FAIL: maintenance restoration lock test timed out\n", stderr); _exit(1) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: watchdog)
+        defer {
+            try? input.fileHandleForWriting.close()
+            child.waitUntilExit(); watchdog.cancel()
+        }
+        try input.fileHandleForReading.close(); try output.fileHandleForWriting.close()
+        let ready = try output.fileHandleForReading.read(upToCount: 6)
+        try check(ready == Data("READY\n".utf8), "Restoration fixture child did not acquire its lifetime lock")
+        let restored = try SystemUpdate.prepareRestoration(read: { steps.append("read"); return record }, stop: {
+            steps.append("stop")
+            try input.fileHandleForWriting.write(contentsOf: Data([10])); try input.fileHandleForWriting.close()
+            child.waitUntilExit()
+            try check(child.terminationStatus == 0, "Restoration did not stop its lock-owning fixture normally")
+        }, lock: { steps.append("lock"); return try acquire() }, save: {
+            try requireHeld(); steps.append("save"); record = $0
+        }, protect: { try requireHeld(); steps.append("protect") })
+        try check(steps == ["read", "stop", "lock", "read", "save", "protect"] && restored == record &&
+                  record.phase == .restoring && record.id == original.id && record.backupID == original.backupID,
+                  "Restoration acquired the lock before stopping or changed its checkpoint identity")
+    }
+    do { let released = try acquire(); withExtendedLifetime(released) {} }
+    print("PASS: maintenance restoration stops a lifetime-lock child before acquiring the same runtime lock")
+
+    let absent = try SystemUpdate.prepareRestoration(read: { nil }, stop: { throw GuardError("Unexpected stop") },
+        lock: { throw GuardError("Unexpected lock") }, save: { _ in throw GuardError("Unexpected save") },
+        protect: { throw GuardError("Unexpected PF operation") })
+    try check(absent == nil, "Absent maintenance unexpectedly changed the running service")
+    for failure in ["read", "reread", "stop", "lock", "save", "protect", "changed", "removed"] {
+        var reads = 0, protected = false, saved = false
+        do {
+            _ = try SystemUpdate.prepareRestoration(read: {
+                reads += 1
+                if failure == "read" || (reads == 2 && failure == "reread") { throw GuardError("injected \(failure)") }
+                if reads == 2 && failure == "removed" { return nil }
+                if reads == 2 && failure == "changed" { return SystemUpdate(userID: 501, backupID: UUID().uuidString) }
+                return original
+            }, stop: {
+                if failure == "stop" { throw GuardError("injected stop") }
+            }, lock: {
+                if failure == "lock" { throw GuardError("injected lock") }
+                return try acquire()
+            }, save: { checkpoint in
+                try requireHeld()
+                if failure == "save" { throw GuardError("injected save") }
+                saved = true
+                try check(checkpoint.phase == .restoring && checkpoint.id == original.id, "Restoration published the wrong checkpoint")
+            }, protect: {
+                try requireHeld(); protected = true
+                if failure == "protect" { throw GuardError("injected protect") }
+            })
+            throw GuardError("Expected restoration failure was swallowed: \(failure)")
+        } catch {
+            let message = String(describing: error)
+            try check(!message.contains("swallowed") && protected == !["stop", "lock"].contains(failure) &&
+                      saved == (failure == "protect"), "Restoration skipped failure protection or continued past a failed step: \(failure)")
+            if ["read", "reread", "save", "protect"].contains(failure) {
+                try check(message.contains("injected \(failure)"), "Restoration lost the original failure: \(failure)")
+            }
+        }
+    }
+    print("PASS: restoration rechecks checkpoints under lock, protects failed reads/saves and stops on service/lock errors")
 }

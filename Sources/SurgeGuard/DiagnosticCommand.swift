@@ -17,9 +17,10 @@ enum DiagnosticCommand {
             let source = "guard_events" + suffix
             do {
                 // The user-owned collector/formatter never runs as root.
-                let result = try Command.run("/usr/bin/sudo", ["-n", "/usr/bin/tail", "-c", "1048576", Paths.eventsLog + suffix], timeout: 3)
+                let result = try Command.run("/usr/bin/sudo", ["-n", "/usr/bin/tail", "-c", "1048577", Paths.eventsLog + suffix], timeout: 3)
                 guard result.status == 0 else { throw GuardError(result.diagnostics) }
-                report.ingest(result.output, source: source, jsonLines: true, tailOnly: result.output.utf8.count == DiagnosticReport.maximumInputBytes)
+                let (text, partial) = try DiagnosticReport.boundedTail(result.outputData)
+                report.ingest(text, source: source, jsonLines: true, tailOnly: partial)
             } catch { report.unavailable(source, error: "\(error); private logs may require sudo authentication") }
             do {
                 guard let data = try UserPaths.readPrivate(UserPaths.log + suffix, maximumBytes: Int64(DiagnosticReport.maximumInputBytes)) else {

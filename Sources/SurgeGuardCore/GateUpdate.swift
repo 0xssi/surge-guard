@@ -62,6 +62,7 @@ public struct GateSurgeIdentity: Codable {
     public var reason = "unverified"
     public var checkedAt = Date()
     public var checkedUptime = SystemClock.seconds
+    public var satisfiesPolicy: Bool { pid != nil && (verified || reason == "dedicated_group_not_required") }
     public init() {}
 }
 
@@ -173,6 +174,16 @@ public struct GateShutdownRequest: Codable {
         guard try Self.load(from: path)?.id == id else { return false }
         try FileManager.default.removeItem(atPath: path)
         return true
+    }
+    // Return a decline reason only after withdrawal; filesystem failures remain errors.
+    public func consume(maintenance: Bool, at path: String = path, validate: () throws -> Void) throws -> String? {
+        guard try withdraw(at: path) else { throw GuardError("Queued shutdown request changed before consumption") }
+        do {
+            guard !maintenance else { throw GuardError("System update maintenance prevents ordered shutdown") }
+            try validate()
+        }
+        catch { return String(describing: error) }
+        return nil
     }
     // Stop/uninstall hold command.lock and the stopped service's gate.lock, excluding all request writers.
     public static func cancel(at path: String = path) throws {

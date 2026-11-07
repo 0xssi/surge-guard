@@ -107,9 +107,25 @@ public struct DiagnosticReport {
         }
         var result: [String: Any] = ["source": source, "status": "read", "coverage": "retained_records_only",
                                      "tail_only": tailOnly, "malformed_or_undated_lines": malformed, "records_in_window": matched,
-                                     "history_start_unverified": first.map { $0 > startedAt } ?? true]
+                                     "history_start_unverified": first.map { $0 > startedAt } ?? true, "observations": 1]
         if let first { result["first_observed_at"] = first.timeIntervalSince1970 }
         if let last { result["last_observed_at"] = last.timeIntervalSince1970 }
+        if source == "surge_memory", let index = sources.firstIndex(where: { $0["source"] as? String == source && $0["status"] as? String == "read" }) {
+            let previous = sources[index]
+            result["tail_only"] = tailOnly || previous["tail_only"] as? Bool == true
+            for key in ["observations", "records_in_window", "malformed_or_undated_lines"] {
+                result[key] = (previous[key] as? Int ?? 0) + (result[key] as? Int ?? 0)
+            }
+            if let first = previous["first_observed_at"] as? Double {
+                result["first_observed_at"] = min(first, result["first_observed_at"] as? Double ?? first)
+            }
+            if let last = previous["last_observed_at"] as? Double {
+                result["last_observed_at"] = max(last, result["last_observed_at"] as? Double ?? last)
+            }
+            result["history_start_unverified"] = (result["first_observed_at"] as? Double).map { $0 > startedAt.timeIntervalSince1970 } ?? true
+            sources[index] = result
+            return
+        }
         sources.append(result)
     }
 
@@ -171,6 +187,22 @@ public struct DiagnosticReport {
         return lines.joined(separator: "\n").unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) || $0 == "\n" }.map(String.init).joined()
     }
 
+    public static func boundedTail(_ data: Data, maximumBytes: Int = maximumInputBytes) throws -> (String, Bool) {
+        guard maximumBytes > 0, maximumBytes <= maximumInputBytes, data.count <= maximumBytes + 1 else {
+            throw GuardError("Invalid diagnostic tail bound")
+        }
+        let partial = data.count > maximumBytes
+        var bytes = data
+        if partial {
+            let preceding = bytes.removeFirst()
+            if preceding != 10 {
+                if let newline = bytes.firstIndex(of: 10) { bytes.removeSubrange(bytes.startIndex...newline) }
+                else { bytes.removeAll() }
+            }
+        }
+        return (String(decoding: bytes, as: UTF8.self), partial)
+    }
+
     public static func readTail(_ path: String, maximumBytes: Int = 524_288) throws -> (String, Bool) {
         guard maximumBytes > 0, maximumBytes <= maximumInputBytes else { throw GuardError("Invalid diagnostic input bound") }
         let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
@@ -180,11 +212,11 @@ public struct DiagnosticReport {
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_uid == getuid(), info.st_mode & S_IFMT == S_IFREG,
               info.st_mode & 0o022 == 0, info.st_size >= 0 else { throw GuardError("Unsafe diagnostic log") }
-        let partial = info.st_size > maximumBytes
-        if partial { try handle.seek(toOffset: UInt64(info.st_size) - UInt64(maximumBytes)) }
-        let data = try handle.read(upToCount: maximumBytes) ?? Data()
-        let text = String(decoding: data, as: UTF8.self)
-        return (partial ? text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).dropFirst().joined(separator: "\n") : text, partial)
+        let count = min(Int64(info.st_size), Int64(maximumBytes) + 1)
+        try handle.seek(toOffset: UInt64(info.st_size) - UInt64(count))
+        let data = try handle.read(upToCount: Int(count)) ?? Data()
+        guard data.count == Int(count) else { throw GuardError("Diagnostic log changed while reading; retry collection") }
+        return try boundedTail(data, maximumBytes: maximumBytes)
     }
 
     public func save(rotatePrevious: Bool = true) throws {

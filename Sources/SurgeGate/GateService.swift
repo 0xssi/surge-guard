@@ -46,7 +46,7 @@ func pendingLaunchState() throws -> (request: GatePendingLaunch, disposition: Ga
         }
         let child = try request.child.flatMap { try SurgeProcess.read(pid: $0.pid) }
         let identity = surgeIdentity()
-        let verified = identity.verified && identity.pid == child?.pid ? child : nil
+        let verified = identity.satisfiesPolicy && identity.pid == child?.pid ? child : nil
         if let verified { surgeExitObserver?.verifiedStartup(matching: verified) }
         let submissionRunning: Bool?
         if let submission = request.submission {
@@ -60,7 +60,7 @@ func pendingLaunchState() throws -> (request: GatePendingLaunch, disposition: Ga
     let appRunning: Bool
     if request.app == "com.nssurge.surge-mac" {
         let identity = surgeIdentity()
-        appRunning = identity.pid != nil && (identity.verified || identity.reason == "dedicated_group_not_required")
+        appRunning = identity.satisfiesPolicy
     } else {
         appRunning = NSRunningApplication.runningApplications(withBundleIdentifier: request.app).contains(where: { !$0.isTerminated })
     }
@@ -387,20 +387,21 @@ func run() throws {
                 guard try GatePendingLaunch.observationIsCurrent(launchState?.request) else { continue }
                 maintenance = try SystemUpdate.load()
                 let queuedRequest = try GateShutdownRequest.load()
-                maintenanceSettled = launchState == nil && queuedRequest == nil && shutdownPhase == .idle
-                request = maintenance == nil ? queuedRequest : nil
+                request = queuedRequest
                 if let queued = request {
-                    try queued.withdraw()
-                    do {
+                    let declined = try queued.consume(maintenance: maintenance != nil) {
                         try GateShutdownRequest.validate(paused: GateUpdate.load()?.paused == true,
                                                          pendingLaunch: launchState?.request, phase: shutdownPhase)
-                        try publish("shutting_down", "Waiting for applications to quit", pending: pending)
-                    } catch {
+                    }
+                    if let reason = declined {
                         request = nil
-                        event("shutdown_declined", "\(error). No applications were asked to quit; this request was removed", level: "error",
+                        event("shutdown_declined", "\(reason). No applications were asked to quit; this request was removed", level: "error",
                               details: ["request_id": queued.id.uuidString])
+                    } else {
+                        try publish("shutting_down", "Waiting for applications to quit", pending: pending)
                     }
                 }
+                maintenanceSettled = try launchState == nil && GateShutdownRequest.load() == nil && shutdownPhase == .idle
             }
             if let maintenance {
                 if maintenanceSettled, lastMaintenanceID != maintenance.id {
@@ -459,7 +460,7 @@ func run() throws {
                 var waitingForIdentity = false
                 var waitingForNetwork = false
                 let needsSurge = identity.pid == nil || identity.reason == "surge_egress_identity_mismatch"
-                if !needsSurge, identity.verified || identity.reason == "dedicated_group_not_required" {
+                if !needsSurge, identity.satisfiesPolicy {
                     surgeRetry.succeeded(at: SystemClock.seconds, launched: false)
                 }
                 if needsSurge, surgeRetry.canAttempt(at: SystemClock.seconds) {

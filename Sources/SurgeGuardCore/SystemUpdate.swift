@@ -81,6 +81,33 @@ public struct SystemUpdate: Codable, Equatable {
         }
     }
 
+    public static func prepareRestoration(read: () throws -> SystemUpdate? = { try load() },
+                                          stop: () throws -> Void,
+                                          lock: () throws -> RuntimeLock = { try RuntimeLock(timeout: 20) },
+                                          save: (SystemUpdate) throws -> Void = { try $0.save() },
+                                          protect: () throws -> Void) throws -> SystemUpdate? {
+        let observed = Result { try read() }
+        if case .success(nil) = observed { return nil }
+        // A running daemon owns the runtime lock until stop has completed.
+        try stop()
+        let runtime = try lock()
+        defer { withExtendedLifetime(runtime) {} }
+        let prepared = try loadProtectingOnFailure(read: {
+            guard var record = try read() else {
+                throw GuardError("Maintenance request disappeared before restoration; inspect status")
+            }
+            if case .success(let initial) = observed, record != initial {
+                throw GuardError("Maintenance request changed before restoration; retry after inspection")
+            }
+            record.phase = .restoring
+            try save(record)
+            return record
+        }, protect: protect)
+        guard let record = prepared else { throw GuardError("Missing restoration checkpoint") }
+        try protect()
+        return record
+    }
+
     public func verified(by report: StatusReport) -> Bool {
         guard report.snapshot?.systemUpdateId == id, report.systemUpdate == self else { return false }
         switch phase {

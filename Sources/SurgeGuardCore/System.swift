@@ -5,7 +5,8 @@ import SystemConfiguration
 
 public struct CommandResult {
     public let status: Int32
-    public let output: String
+    public let outputData: Data
+    public var output: String { String(decoding: outputData, as: UTF8.self) }
     public let diagnostics: String
     public var combined: String { output + diagnostics }
 }
@@ -104,7 +105,8 @@ public enum Command {
                         guard errno == EAGAIN || errno == EWOULDBLOCK else { throw GuardError("Cannot read \(invocation) output: errno \(errno)") }
                         break
                     }
-                    guard captures[index].count + count <= 1_048_576 else { throw GuardError("\(invocation) output exceeded limits") }
+                    // One boundary byte distinguishes a complete 1 MiB log from a truncated tail.
+                    guard captures[index].count + count <= 1_048_577 else { throw GuardError("\(invocation) output exceeded limits") }
                     captures[index].append(contentsOf: buffer.prefix(count))
                 }
             }
@@ -128,7 +130,7 @@ public enum Command {
                 }
             }
             if let exitStatus, eof.allSatisfy({ $0 }) {
-                return CommandResult(status: exitStatus, output: String(decoding: captures[0], as: UTF8.self),
+                return CommandResult(status: exitStatus, outputData: captures[0],
                                      diagnostics: String(decoding: captures[1], as: UTF8.self))
             }
             let now = SystemClock.seconds

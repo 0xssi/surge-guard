@@ -2477,3 +2477,69 @@ concurrent emergency/Start, reboot/login, process-specific routing acceptance,
 or packet-level no-bypass testing. Newly added root-owned address journal writes
 and scoped live state removal require authorized deployment/acceptance; unit
 fixtures and native PF parsing do not establish that live behavior.
+
+## 2026-11-06 — Maintenance/Gate state-machine and diagnostic boundary fixes
+
+The follow-up review confirmed six defects in `4f7c2d5`. In particular, the new
+End-maintenance pre-read lock waited for the still-running daemon's lifetime
+lock before reaching Stop. Previously passing tests exercised the underlying
+protection callback rather than this restoration sequence. No live End pass
+had been established by that earlier verification.
+
+Changes:
+
+- End now uses one shared restoration sequence: inspect without the lifetime
+  lock, stop, acquire runtime lock, re-read/compare, save `restoring`, then
+  restore protection. Absent maintenance leaves the service alone. Corrupt,
+  changed, removed or unwritable checkpoints attempt blocking under lock while
+  retaining the original error; stop/lock failures cannot claim completion.
+  Normal completion still requires the existing fresh PID/boot/nonce-bound PF
+  verification before checkpoint removal. Invalid records remain errors for
+  explicit administrator repair.
+- Gate withdraws queued power requests observed during maintenance before
+  publishing acknowledgement, with `shutdown_declined` and the request ID.
+  Consumption removes its exact marker before throwable validation; filesystem
+  failures and replacement requests are not reported as successful consumption.
+  Existing launch and ongoing-power fences, saved sessions and Surge update
+  pause remain in force.
+- Ordinary and launchd launches share the current-policy identity predicate.
+  A pending persistent launch may settle after switching to enhanced, only for
+  the same trusted child PID/native birth identity. Required dedicated-group
+  mismatches and unrelated/reused children remain rejected.
+- Both file and privileged log tails use one byte-boundary decoder. One extra
+  context byte distinguishes complete 1 MiB inputs from actual truncation and
+  preserves aligned full records while dropping only known first-line fragments.
+  Command results retain raw stdout bytes, keeping UTF-8 split boundaries exact;
+  the bounded command output cap increases by that single context byte.
+- Repeated successful memory polls aggregate one logical source, observation
+  count, record counters and observed range. Real non-overlapping memory windows
+  retain their explicit gap evidence and no no-bypass claim is added.
+
+Performed:
+
+- `scripts/check.sh` passed with 101 PASS records, including standalone Swift/C
+  regressions, warnings-as-errors release builds, lock/CLI/example checks, native
+  parse-only PF checks, shell syntax and whitespace validation.
+- The shared production restoration sequence was exercised with a child process
+  holding a real temporary RuntimeLock. Stop releases that child before acquiring
+  the same lock; re-read/save/protect assert that the lock is held. Read/re-read,
+  stop, lock, save, protect, replacement and disappearance faults are covered,
+  together with missing-record no-op and original nonce/backup retention.
+- Private temporary shutdown markers exercise maintenance withdrawal, no replay,
+  pause/launch/power rejection, throwing validation and replacement-nonce refusal.
+  Current-policy identity tests cover enhanced settlement without accepting a
+  missing/mismatched process; the existing native birth/PID-reuse tests passed.
+- Tail fixtures cover complete and partial line boundaries, the requested-window
+  start, exact 1 MiB inputs, an extra newline or partial record, split UTF-8 bytes
+  and invalid bounds. Sixty duplicate memory observations retain one record and
+  one source summary, while a subsequent true window gap remains visible.
+- Built release `check --config examples/enhanced.json --json`, `status --json`
+  and invalid `diagnose --minutes 0 --json` all returned parseable JSON with the
+  expected success/failure exit conventions. Status reads describe the existing
+  installed daemon, not deployment of these fixes.
+
+Not performed: reinstalling or restarting Guard/Gate/Surge, live maintenance
+begin/end, actual shutdown/restart submission, live policy changes during Surge
+launch, privileged log collection, PF/DNS mutation, real device/network failures,
+or packet-level enforcement acceptance. The lock child and injected callbacks
+operate only on temporary fixtures; they are not a real system-update pass.

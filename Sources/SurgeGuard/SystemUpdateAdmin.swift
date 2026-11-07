@@ -63,23 +63,10 @@ enum SystemUpdateAdmin {
     }
 
     static func end() throws {
-        let existing: SystemUpdate?
-        do {
-            let lock = try RuntimeLock(timeout: 20)
-            defer { withExtendedLifetime(lock) {} }
-            existing = try SystemUpdate.loadProtectingOnFailure { try Firewall().prepareBlocking() }
-        }
-        guard var record = existing else {
-            print("No system update maintenance record. Inspect status for current protection.")
-            return
-        }
-        record.phase = .restoring
-        try record.save()
-        EventLog.write("system_update_restoring", message: "Explicitly restoring original protection; Gate remains paused until PF verification", details: ["request_id": record.id.uuidString])
-        try Admin.stop()
-        do {
-            let lock = try RuntimeLock(timeout: 20)
-            defer { withExtendedLifetime(lock) {} }
+        let prepared = try SystemUpdate.prepareRestoration(stop: { try Admin.stop() }, save: { record in
+            try record.save()
+            EventLog.write("system_update_restoring", message: "Explicitly restoring original protection; Gate remains paused until PF verification", details: ["request_id": record.id.uuidString])
+        }, protect: {
             try RootFiles.verify(Policy.anchorPath)
             let anchor = try String(contentsOfFile: Policy.anchorPath)
             guard anchor == Policy.blocked || anchor == SystemUpdate.suspendedAnchor else {
@@ -89,6 +76,10 @@ enum SystemUpdateAdmin {
             let firewall = Firewall()
             try firewall.prepareAttachment()
             try firewall.block()
+        })
+        guard let record = prepared else {
+            print("No system update maintenance record. Inspect status for current protection.")
+            return
         }
         try Admin.start()
         let report = try waitForVerification(record)

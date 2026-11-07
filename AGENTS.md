@@ -171,6 +171,10 @@ Read README.md first. It is the operational contract for all three components.
   status before removing the checkpoint. Block incompatible management commands.
   Show orange maintenance and all-application direct-access scope, never green
   protection; intent alone is not verification. Retain offline emergency access.
+  End stops the daemon before acquiring its lifetime runtime lock, then rechecks
+  the checkpoint under lock. Gate withdraws queued power requests it observes
+  during maintenance; no deferred replay after End. A pending launch may settle
+  under enhanced policy only for its same trusted PID/native birth identity.
   Use snapshot version 2 only for maintenance so version-1 readers cannot mistake
   empty rules for verified blocking; normal protection remains version 1.
 

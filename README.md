@@ -202,6 +202,9 @@ no restart policy and removes itself after exit. Its private staging plist stays
 outside `~/Library/LaunchAgents`, so it is not an independent login startup item.
 An already-running valid Surge is retained; deploying Gate does not retroactively
 change that process's parentage. The new path applies to the next dedicated launch.
+If policy changes from persistent TCP to enhanced during a pending launch, the
+same signed, PID/birth-bound child may settle under the current policy without
+a dedicated-group requirement. An unrelated process cannot settle that request.
 
 The fixed group remains the only Surge TCP egress identity across restarts and
 application updates. It is never learned from the current process or widened to
@@ -428,6 +431,12 @@ and allowing Gate to resume. `blocked` is a successful protection restoration,
 not successful networking; Surge and all original policy checks must still pass.
 An original Surge update pause remains paused and requires its own explicit
 `update-resume`. Connections may reset while protection is restored.
+End first inspects the checkpoint without taking the daemon's lifetime lock,
+stops the service, then rechecks and saves restoration under that lock. A missing
+checkpoint leaves the service unchanged. Changed, corrupt or unwritable records
+attempt blocking under the lock and remain errors rather than completed maintenance.
+Gate withdraws queued ordered-power requests observed during maintenance and
+records `shutdown_declined`; they are not deferred for replay after End.
 
 On error, retain the checkpoint and retry the same command; never delete it to
 force a success. During preparation/active maintenance retry `os-update-begin` or
@@ -706,6 +715,11 @@ Surge memory-log lines every two seconds, retaining only DNS/QUIC/socket context
 It stops after the requested monotonic duration, at most 300 seconds. The report
 retains at most 1,500 newest entries with a 2 MiB evidence budget and a 6 MiB
 serialized limit. Human output shows the last 80 retained entries.
+Tail readers inspect one extra boundary byte without adding it to the retained
+input budget. A complete 1 MiB event file is not marked tail-only; a known
+truncated first-line fragment is removed without counting it as malformed JSON.
+Memory-log polls share one source summary with an `observations` count and
+combined observed range. Actual non-overlapping windows remain separate gap evidence.
 Initial/final status collection takes additional bounded command time. A writer
 lock refuses overlapping diagnostic runs before either can replace the report.
 

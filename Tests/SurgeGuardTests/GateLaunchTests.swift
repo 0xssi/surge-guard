@@ -39,6 +39,16 @@ func gateLaunchTests() throws {
                   "Submission completion/observer loss incorrectly settled a launch")
     }
     request.child = child
+    var identity = GateSurgeIdentity()
+    identity.pid = child.pid; identity.reason = "dedicated_group_not_required"
+    let verifiedAfterPolicyChange = identity.satisfiesPolicy && identity.pid == child.pid ? child : nil
+    try check(request.launchdDisposition(job: .running(child.pid), submissionRunning: false,
+                                        verifiedApp: verifiedAfterPolicyChange, childIdentity: child) == .settled,
+              "Changing persistent TCP to enhanced left a verified running child unresolved")
+    identity.reason = "surge_egress_identity_mismatch"
+    try check(!identity.satisfiesPolicy, "A persistent identity mismatch could settle a launch")
+    identity.reason = "dedicated_group_not_required"; identity.pid = nil
+    try check(!identity.satisfiesPolicy, "A missing trusted process satisfied the enhanced launch policy")
     for (job, submission, verified, native, expected) in [
         (GateLaunchJob.State.running(123), true, child, child, GatePendingLaunch.Disposition.inFlight),
         (.running(123), false, child, child, .settled), (.absent, nil, child, child, .settled),
@@ -54,6 +64,40 @@ func gateLaunchTests() throws {
     try UserPaths.prepare(directory.path)
     defer { try? FileManager.default.removeItem(at: directory) }
     let path = directory.appendingPathComponent("pending.json").path
+    do {
+        let lock = try UserPaths.lock(at: directory.appendingPathComponent("request.lock").path)
+        defer { close(lock) }
+        let shutdownPath = directory.appendingPathComponent("shutdown.json").path
+        for maintenance in [true, false] {
+            let shutdown = try GateShutdownRequest(action: "restart")
+            try AtomicFile.write(try JSON.encode(shutdown), to: shutdownPath, mode: 0o600)
+            var validated = false
+            let declined = try shutdown.consume(maintenance: maintenance, at: shutdownPath) {
+                validated = true
+                try GateShutdownRequest.validate(paused: false, pendingLaunch: nil, phase: .idle)
+            }
+            try check((declined != nil) == maintenance && validated == !maintenance && GateShutdownRequest.load(from: shutdownPath) == nil,
+                      "Maintenance hid a queued shutdown or normal consumption lost its request")
+            try check(try GateShutdownRequest.load(from: shutdownPath) == nil, "Ending maintenance could replay an old power request")
+        }
+        for (paused, pending, phase) in [(true, nil as GatePendingLaunch?, GateShutdownPhase.idle),
+                                         (false, request, .idle), (false, nil, .quitting)] {
+            let shutdown = try GateShutdownRequest(action: "shutdown")
+            try AtomicFile.write(try JSON.encode(shutdown), to: shutdownPath, mode: 0o600)
+            try check(try shutdown.consume(maintenance: false, at: shutdownPath, validate: {
+                try GateShutdownRequest.validate(paused: paused, pendingLaunch: pending, phase: phase)
+            }) != nil &&
+                      GateShutdownRequest.load(from: shutdownPath) == nil, "Declined shutdown retained a replayable marker")
+        }
+        let old = try GateShutdownRequest(action: "restart"), replacement = try GateShutdownRequest(action: "shutdown")
+        try AtomicFile.write(try JSON.encode(replacement), to: shutdownPath, mode: 0o600)
+        try rejects { _ = try old.consume(maintenance: true, at: shutdownPath, validate: {}) }
+        try check(try GateShutdownRequest.load(from: shutdownPath)?.id == replacement.id, "Consumption withdrew a replacement request")
+        let failedValidation = try replacement.consume(maintenance: false, at: shutdownPath) { throw GuardError("update record unreadable") }
+        try check(failedValidation == "update record unreadable" && GateShutdownRequest.load(from: shutdownPath) == nil,
+                  "Throwing consumption validation left a replayable shutdown request")
+    }
+    print("PASS: maintenance withdraws queued power requests before acknowledgement; enhanced policy settles only its trusted launch child")
     request.submission = SurgeProcess(pid: 124, startedSeconds: 100, startedMicroseconds: 2)
     try request.save(at: path)
     try check(try GatePendingLaunch.load(from: path) == request, "Job identity/submission did not survive Gate restart")

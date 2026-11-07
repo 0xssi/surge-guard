@@ -117,4 +117,71 @@ func diagnosticTests() throws {
     let saved = try Command.run("/usr/bin/env", ["CFFIXED_USER_HOME=" + directory.path, CommandLine.arguments[0], "--diagnostic-save-check"], timeout: 5)
     try check(saved.status == 0, "Private diagnostic checkpoint failed: \(saved.combined)")
     print("PASS: diagnostic limits, raw evidence, coverage gaps, deduplication and private session checkpoints")
+    try diagnosticBoundaryTests()
+}
+
+func diagnosticBoundaryTests() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("diagnostic-boundaries-" + UUID().uuidString)
+    try UserPaths.prepare(directory.path)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let path = directory.appendingPathComponent("log").path
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.timeZone = .current
+    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSSSSS"
+    let first = formatter.string(from: now.addingTimeInterval(-1200)) + " [SGDNS] first\n"
+    let second = formatter.string(from: now.addingTimeInterval(-1190)) + " [SGDNS] second\n"
+    try AtomicFile.write("old\n" + first + second, to: path, mode: 0o600)
+    let (aligned, partial) = try DiagnosticReport.readTail(path, maximumBytes: (first + second).utf8.count)
+    try check(partial && aligned == first + second, "Tail reading discarded a complete record at a line boundary")
+    var alignedReport = DiagnosticReport(minutes: 20, now: now)
+    alignedReport.ingest(aligned, source: "fixture", jsonLines: false, now: now, tailOnly: partial)
+    try check(alignedReport.entries.count == 2 && alignedReport.sources[0]["history_start_unverified"] as? Bool == false,
+              "Aligned tail reading lost evidence at the diagnostic window boundary")
+    let (fragment, fragmentPartial) = try DiagnosticReport.readTail(path, maximumBytes: second.utf8.count + 2)
+    try check(fragmentPartial && fragment == second, "Tail reading retained a partial first line")
+    let (whole, wholePartial) = try DiagnosticReport.readTail(path, maximumBytes: try String(contentsOfFile: path).utf8.count)
+    try check(!wholePartial && whole.hasPrefix("old\n"), "Whole-file boundary was marked truncated")
+    print("PASS: diagnostic tails preserve complete boundary records and discard only known partial lines")
+
+    let json = "{\"time\":\(now.timeIntervalSince1970 - 1),\"event\":\"fixture\"}"
+    let line = json + String(repeating: " ", count: 127 - json.utf8.count) + "\n"
+    let full = String(repeating: line, count: DiagnosticReport.maximumInputBytes / 128)
+    for prefix in ["", "\n", "x"] {
+        try AtomicFile.write(prefix + full, to: path, mode: 0o600)
+        let result = try Command.run("/usr/bin/tail", ["-c", "1048577", path])
+        let (text, truncated) = try DiagnosticReport.boundedTail(result.outputData)
+        var report = DiagnosticReport(minutes: 20, now: now)
+        report.ingest(text, source: "guard_events", jsonLines: true, now: now, tailOnly: truncated)
+        try check(result.status == 0 && truncated == !prefix.isEmpty && report.entries.count == 1 &&
+                  report.sources[0]["malformed_or_undated_lines"] as? Int == 0 &&
+                  report.sources[0]["records_in_window"] as? Int == full.utf8.count / 128 - (prefix == "x" ? 1 : 0),
+                  "Exact 1 MiB root-log collection invented truncation, lost a complete first record or counted a known fragment as malformed")
+    }
+    let raw = try Command.run("/usr/bin/printf", ["\\270\\255\\n" + json + "\n"])
+    try check(raw.outputData.prefix(3) == Data([0xb8, 0xad, 10]), "Command output re-encoded a partial UTF-8 character")
+    let (decoded, _) = try DiagnosticReport.boundedTail(raw.outputData, maximumBytes: raw.outputData.count - 1)
+    try check(decoded == json + "\n", "Byte-tail trimming corrupted the first complete UTF-8 JSON record")
+    try rejects { _ = try DiagnosticReport.boundedTail(Data(), maximumBytes: 0) }
+    try rejects { _ = try DiagnosticReport.boundedTail(Data(repeating: 0, count: 10), maximumBytes: 8) }
+    print("PASS: byte-accurate privileged tail bounds distinguish exact 1 MiB files, line boundaries and UTF-8 fragments")
+
+    var watch = DiagnosticReport(minutes: 20, now: now)
+    let memoryLine = formatter.string(from: now.addingTimeInterval(-1)) + " [SGDNS] repeated observation"
+    let memory = String(decoding: try JSONSerialization.data(withJSONObject: ["log": memoryLine]), as: UTF8.self)
+    for _ in 0..<60 { try watch.ingestMemory(memory, now: now) }
+    let source = watch.sources.first { $0["source"] as? String == "surge_memory" }
+    try check(watch.sources.count == 1 && source?["observations"] as? Int == 60 && watch.entries.count == 1 &&
+              watch.render().components(separatedBy: "证据缺口：").count - 1 == 1,
+              "Repeated watch polls flooded the report with duplicate logical sources or lost their observation count")
+    let overlap = String(decoding: try JSONSerialization.data(withJSONObject: ["log": first + memoryLine]), as: UTF8.self)
+    try watch.ingestMemory(overlap, now: now)
+    try check(watch.sources[0]["first_observed_at"] as? Double == watch.startedAt.timeIntervalSince1970 &&
+              watch.sources[0]["history_start_unverified"] as? Bool == false, "Memory-source aggregation forgot its earliest observed record")
+    let later = formatter.string(from: now.addingTimeInterval(3)) + " [SGDNS] later"
+    try watch.ingestMemory(String(decoding: JSONSerialization.data(withJSONObject: ["log": later]), as: UTF8.self), now: now.addingTimeInterval(4))
+    try check(watch.sources.contains { $0["source"] as? String == "surge_memory_gap" && $0["status"] as? String == "unavailable" } &&
+              watch.render().contains("memory_windows_do_not_overlap") && (watch.object["no_bypass_verified"] as? Bool) == false,
+              "Watch aggregation concealed a real continuity gap or claimed no bypass")
+    print("PASS: watch reports aggregate repeated memory sources while preserving real continuity gaps")
 }

@@ -100,8 +100,10 @@ a pass; record any unresolved startup race separately.
 For explicit `os-update-begin` / `os-update-end`, use a disposable Mac/VM and
 authorize the all-application direct-access interval first. Upgrade Guard/Gate
 and install the offline recovery menu. Check that old/stopped Gate, active or
-orphaned launches, queued power requests and stale/wrong-nonce status prevent
-release. Cancel preparation and confirm saved sessions and the original Surge
+orphaned launches and stale/wrong-nonce status prevent release. Gate must withdraw
+queued power requests observed during maintenance and record their declined IDs
+before acknowledging; an ongoing power operation still prevents acknowledgement.
+Cancel preparation and confirm no old queued power request is replayed, and saved sessions and the original Surge
 update pause survive. Enter maintenance and verify the own disk anchor and live
 rules are empty, with other anchors/NAT/options retained; check orange status,
 fresh process-bound `maintenance`, paused Gate, and no green protection claim.
@@ -112,6 +114,10 @@ checkpoint removal), retry and verify no false completion. Test missing default
 PF attachment recovery on End, and refusal of custom/unsafe layouts. Verify End
 clears old states and accepts freshly verified blocked or allowed protection
 before Gate resumes. End must preserve an existing Surge `update-pause`.
+Run End while the active-maintenance daemon is still running: it must stop that
+daemon before acquiring the runtime lock, without an emergency unlock first.
+Changed/corrupt/unwritable checkpoint failures must retain the record and error
+and attempt blocking under the lock, with no false completion.
 Check the independent emergency and fallback-menu paths with a broken renderer;
 an emergency rule removal must leave the maintenance checkpoint intact. Confirm
 normal menu/Gate operation after End. Real macOS download/install/reboot and
@@ -301,6 +307,9 @@ regressions do not establish their live outcomes.
   failure and a 10-second startup timeout: active submissions/jobs must fence
   update pause and ordered shutdown; query errors remain unknown. Perform any
   Wi-Fi/VPN reconnect compatibility replay only with separate authorization.
+  Switch persistent TCP to enhanced while its launch is pending: the same
+  trusted child must settle under the current policy, while unrelated/reused
+  process identities must not. Application restoration still requires verified PF.
 - Change the Surge candidate set while Guard is allowed and while already blocked.
   Verify signature and route results are invalidated, including a second candidate
   appearing during signature validation. Reopening requires new route evidence.
@@ -393,6 +402,10 @@ read the fixed private event files; user collection/formatting remains unprivile
 Short observations do not enable the packet recorder or create any PF/DNS
 permission. Packet capture remains an explicit separate audit operation with
 the documented bounded ring, payload/privacy and coverage limits.
+Use exact 1 MiB, aligned-line, mid-line and split-UTF-8 fixtures to verify tail
+boundaries. Repeated identical watch samples must produce one memory-source
+summary with an observation count, while actual non-overlapping windows remain
+explicit gaps and no no-bypass conclusion is inferred.
 
 ## Review-fix fault cases
 

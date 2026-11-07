@@ -3,6 +3,14 @@ import SurgeGuardCore
 import Darwin
 import SystemConfiguration
 
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--hold-runtime-lock" {
+    let held = try RuntimeLock(taking: open(CommandLine.arguments[2], O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600))
+    print("READY"); fflush(stdout)
+    _ = try FileHandle.standardInput.read(upToCount: 1)
+    withExtendedLifetime(held) {}
+    exit(0)
+}
+
 if Array(CommandLine.arguments.dropFirst()) == ["--diagnostic-save-check"] {
     do { try diagnosticSaveCheck(); exit(0) }
     catch { fputs("FAIL: \(error)\n", stderr); exit(1) }
