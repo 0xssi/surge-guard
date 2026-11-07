@@ -291,6 +291,14 @@ Prepare recovery first, as your normal user:
 scripts/install-user.sh --recovery-only
 ```
 
+The installer checks recovery dependencies before replacing user files. Verify
+the installed action with `"$HOME/Library/Application Support/SurgeGuard/bin/surge-guard-action" check-recovery`
+before privileged changes. This check does not authenticate, query services or
+change PF; it is not a live unlock test. Recovery uses the system Perl native
+`flock` and core modules, with no downloaded package or `lockf` executable.
+Missing tools/modules fail before stopping Guard; do not proceed with an upgrade
+when this preflight fails.
+
 For a combined menu, replace its Surge renderer with the `--section` invocation
 below. For a standalone menu, copy `integrations/swiftbar/surge-guard.5s.sh` into
 SwiftBar's configured plugin directory. Confirm **Recovery and backups / 恢复与备份**
@@ -950,6 +958,8 @@ as your normal user in a local Terminal:
 It authenticates only fixed system commands, validates the service state/PID,
 waits for the old process to exit, confirms the job is absent, then clears only
 this anchor under the management/runtime locks and verifies it is empty. It
+rechecks service absence while holding both locks through clearing and verification,
+refusing a concurrent Start. Lock files are never unlinked or replaced. It
 records the result in the macOS system log without invoking the Guard executable.
 Its independent path does not publish the CLI's unlocked marker; stopped/unknown
 cached menu state is not live PF verification. `bootout` returning alone does not establish

@@ -17,6 +17,7 @@ if [ "$#" -gt 1 ]; then
     printf '%s\n' 'Usage: scripts/install-user.sh [--menu-only | --recovery-only | SWIFTBAR_PLUGIN_DIRECTORY]' >&2
     exit 1
 fi
+/bin/bash "$project_dir/integrations/swiftbar/surge-guard-action.sh" check-recovery
 
 mkdir -p "$user_dir/bin"
 chmod 700 "$user_dir" "$user_dir/bin"

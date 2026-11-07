@@ -838,10 +838,21 @@ do {
             if [ -f '\(directory)/stuck' ]; then exit 0; fi
             if [ ! -f '\(directory)/exited' ]; then touch '\(directory)/exited'; exit 0; fi
             exit 1 ;;
-          lockf)
-            if [ -f '\(directory)/lock-busy' ]; then exit 75; fi
-            shift 4; exec "$@" ;;
-          logger|pfctl) exit 0 ;;
+          perl)
+            if [ -f '\(directory)/perl-failed' ]; then exit 127; fi
+            case "$*" in *--check) ;; *)
+              if [ -f '\(directory)/lock-busy' ]; then exit 75; fi
+              if [ -f '\(directory)/start-raced' ]; then rm -f '\(directory)/stopped'; fi ;;
+            esac
+            exec /usr/bin/perl "$@" ;;
+          logger) exit 0 ;;
+          pfctl)
+            if [ "$3" = -F ] && [ -f '\(directory)/pf-clear-failed' ]; then exit 5; fi
+            if [ "$3" = -sr ]; then
+              if [ -f '\(directory)/pf-read-failed' ]; then exit 5; fi
+              if [ -f '\(directory)/pf-rules-present' ]; then echo 'block drop all'; fi
+            fi
+            exit 0 ;;
           tail)
             if [ -f '\(directory)/tail-failed' ]; then exit 5; fi
             printf '%s\\n' '{"event":"gate_state","message":"0 application(s) pending"}' ;;
@@ -853,10 +864,15 @@ do {
         let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         var script = try String(contentsOf: project.appendingPathComponent("integrations/swiftbar/surge-guard-action.sh"))
         script = script.replacingOccurrences(of: "guard_bin=/Library/PrivilegedHelperTools/surge-guard", with: "guard_bin='\(directory)/guard'")
-        for tool in ["launchctl", "kill", "sleep", "pfctl", "tail", "lockf", "logger"] {
-            let original = tool == "pfctl" ? "/sbin/pfctl" : ["tail", "lockf", "logger"].contains(tool) ? "/usr/bin/" + tool : "/bin/" + tool
-            script = script.replacingOccurrences(of: original, with: "'\(directory)/\(tool)'")
+        for tool in ["launchctl", "kill", "sleep", "pfctl", "tail", "perl", "logger"] {
+            let original = tool == "pfctl" ? "/sbin/pfctl" : ["tail", "perl", "logger"].contains(tool) ? "/usr/bin/" + tool : "/bin/" + tool
+            script = script.replacingOccurrences(of: original, with: "\(directory)/\(tool)")
         }
+        script = script.replacingOccurrences(of: "$> == 0", with: "$> == \(geteuid())")
+            .replacingOccurrences(of: "$info[4] == 0", with: "$info[4] == \(geteuid())")
+            .replacingOccurrences(of: "\"/private/var/db/surge-guard/management.lock\"", with: "\"\(directory)/management.lock\"")
+            .replacingOccurrences(of: "\"/private/var/db/surge-guard/lock\"", with: "\"\(directory)/lock\"")
+            .replacingOccurrences(of: "lstat(\"/private/var/db/surge-guard\")", with: "lstat(\"\(directory)\")")
         script = script.replacingOccurrences(of: "sudo ", with: "'\(directory)/sudo' ")
         script = script.replacingOccurrences(of: "$(id -u)", with: "$('\(directory)/id' -u)")
         let rendererPath = directory + "/renderer"
@@ -867,13 +883,33 @@ do {
         chmod(gatePath, 0o700)
         let rendererScript = "#!/bin/sh\nprintf 'renderer %s\\n' \"$*\" >> '\(directory)/calls'\nprintf 'rendered: '\n/bin/cat\n"
         try rendererScript.write(toFile: rendererPath, atomically: true, encoding: .utf8); chmod(rendererPath, 0o700)
-        for tool in ["guard", "sudo", "launchctl", "kill", "sleep", "pfctl", "tail", "id", "lockf", "logger"] {
+        for tool in ["guard", "sudo", "launchctl", "kill", "sleep", "pfctl", "tail", "id", "perl", "logger"] {
             let wrapper = "#!/bin/sh\nexec '\(mock)' \(tool) \"$@\"\n"
             let path = directory + "/" + tool
             try wrapper.write(toFile: path, atomically: true, encoding: .utf8); chmod(path, 0o700)
         }
         let testScript = directory + "/action.sh"
         try script.write(toFile: testScript, atomically: true, encoding: .utf8)
+        try "".write(toFile: directory + "/perl-failed", atomically: true, encoding: .utf8)
+        let preflightFailure = try Command.run("/bin/bash", [testScript, "unlock"], timeout: 5)
+        let preflightCalls = try String(contentsOfFile: directory + "/calls")
+        try check(preflightFailure.status != 0 && preflightFailure.combined.contains("no service was stopped") &&
+                  !preflightCalls.contains("launchctl bootout") && !preflightCalls.contains("\npfctl -a"),
+                  "Missing recovery interpreter stopped Guard or reached PF before dependency validation")
+        try FileManager.default.removeItem(atPath: directory + "/perl-failed")
+        try FileManager.default.moveItem(atPath: directory + "/perl", toPath: directory + "/perl.saved")
+        try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
+        let missingTool = try Command.run("/bin/bash", [testScript, "unlock"], timeout: 5)
+        let missingCalls = try String(contentsOfFile: directory + "/calls")
+        try check(missingTool.status != 0 && missingTool.combined.contains("Missing recovery tool") &&
+                  !missingCalls.contains("sudo ") && !missingCalls.contains("launchctl ") && !missingCalls.contains("pfctl "),
+                  "Absent interpreter executable reached authentication or service commands")
+        try FileManager.default.moveItem(atPath: directory + "/perl.saved", toPath: directory + "/perl")
+        try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
+        let preflight = try Command.run("/bin/bash", [testScript, "check-recovery"], timeout: 5)
+        let checkCalls = try String(contentsOfFile: directory + "/calls")
+        try check(preflight.status == 0 && !checkCalls.contains("sudo ") && !checkCalls.contains("\nlaunchctl print") &&
+                  !checkCalls.contains("\npfctl -a"), "Recovery preflight queried services or required privileged mutation")
         for action in ["diagnose", "diagnose-watch"] {
             try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
             let result = try Command.run("/bin/bash", [testScript, action], timeout: 5)
@@ -901,9 +937,23 @@ do {
         try check(recovered.status == 0 && recovered.output.contains("Protection is OFF"), "Offline recovery failed against legacy fixture: \(recovered.combined)")
         let calls = try String(contentsOfFile: directory + "/calls")
         try check(calls.range(of: "kill -0")!.lowerBound < calls.range(of: "pfctl -a io.github.surge-guard -F rules")!.lowerBound, "Rules cleared before daemon exit check")
-        try check(calls.contains("lockf -k -t 20 /private/var/db/surge-guard/management.lock") &&
-                  calls.contains("lockf -k -t 20 /private/var/db/surge-guard/lock") && calls.contains("manual_unlock"),
+        try check(calls.contains("perl -T") && FileManager.default.fileExists(atPath: directory + "/management.lock") &&
+                  FileManager.default.fileExists(atPath: directory + "/lock") && calls.contains("manual_unlock"),
                   "Independent recovery bypassed management/runtime locking or lost its system-log event")
+        try "".write(toFile: directory + "/start-raced", atomically: true, encoding: .utf8)
+        try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
+        let raced = try Command.run("/bin/bash", [testScript, "unlock"], timeout: 5)
+        try check(raced.status != 0 && !String(contentsOfFile: directory + "/calls").contains("\npfctl -a"),
+                  "Concurrent Start after the outer absence check cleared a running daemon anchor")
+        try FileManager.default.removeItem(atPath: directory + "/start-raced")
+        for fixture in ["pf-clear-failed", "pf-read-failed", "pf-rules-present"] {
+            try "".write(toFile: directory + "/" + fixture, atomically: true, encoding: .utf8)
+            let failed = try Command.run("/bin/bash", [testScript, "unlock"], timeout: 5)
+            try check(failed.status != 0 && !failed.output.contains("Protection is OFF"),
+                      "Recovery claimed protection off after PF clear/read/nonempty verification failure")
+            try FileManager.default.removeItem(atPath: directory + "/" + fixture)
+        }
+        print("PASS: missing recovery tools fail before stopping; locked service/PF failures cannot claim successful unlock")
         try "".write(toFile: directory + "/lock-busy", atomically: true, encoding: .utf8)
         try "".write(toFile: directory + "/calls", atomically: true, encoding: .utf8)
         let busyRecovery = try Command.run("/bin/bash", [testScript, "unlock"], timeout: 5)
@@ -2016,16 +2066,38 @@ do {
         try fixtureExecutable.write(to: target, atomically: true, encoding: .utf8)
         chmod(target.path, 0o700)
     }
+    let preflightAction = menuProject.appendingPathComponent("integrations/swiftbar/surge-guard-action.sh")
+    try """
+    #!/bin/sh
+    if [ "$1" = check-recovery ]; then
+        if [ -f '\(menuProject.path)/preflight-failed' ]; then exit 1; fi
+        /usr/bin/touch '\(menuProject.path)/preflight-checked'
+        exit 0
+    fi
+    echo unexpected-service-query >> '\(menuProject.path)/mutations'
+    exit 1
+    """.write(to: preflightAction, atomically: true, encoding: .utf8)
     let sourceRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     var installer = try String(contentsOf: sourceRoot.appendingPathComponent("scripts/install-user.sh"))
     installer = installer.replacingOccurrences(of: "guard_bin=/Library/PrivilegedHelperTools/surge-guard", with: "guard_bin='\(menuProject.path)/.build/release/surge-guard'")
     installer = installer.replacingOccurrences(of: "set -eu", with: "set -eu\nHOME='\(menuHome.path)'\nexport HOME")
     let installerPath = menuProject.appendingPathComponent("scripts/install-user.sh")
     try installer.write(to: installerPath, atomically: true, encoding: .utf8)
+    let preflightFailurePath = menuProject.appendingPathComponent("preflight-failed")
+    try "".write(to: preflightFailurePath, atomically: true, encoding: .utf8)
+    let refusedMenu = try Command.run("/bin/sh", [installerPath.path, "--recovery-only"], timeout: 10)
+    try check(refusedMenu.status != 0 && String(contentsOf: installedGate) == sentinel &&
+              !FileManager.default.fileExists(atPath: menuUser.appendingPathComponent("bin/surge-guard-ui").path) &&
+              !FileManager.default.fileExists(atPath: menuProject.appendingPathComponent("mutations").path),
+              "Failed recovery preflight changed existing files or services")
+    try FileManager.default.removeItem(at: preflightFailurePath)
     let menuInstall = try Command.run("/bin/sh", [installerPath.path, "--menu-only"], timeout: 10)
     try check(menuInstall.status == 0 && !FileManager.default.fileExists(atPath: menuProject.appendingPathComponent("mutations").path) &&
               String(contentsOf: installedGate) == sentinel && FileManager.default.isExecutableFile(atPath: menuUser.appendingPathComponent("bin/surge-guard-ui").path),
               "Menu-only installer queried or modified a service")
+    try check(FileManager.default.fileExists(atPath: menuProject.appendingPathComponent("preflight-checked").path),
+              "Menu installation skipped recovery dependency preflight")
+    print("PASS: failed recovery dependency preflight leaves installed files and services unchanged")
     print("PASS: menu-only installation updates the renderer without querying/restarting Gate or Guard")
     print("All checks passed. Live packet blocking has NOT been tested by this program.")
 } catch {

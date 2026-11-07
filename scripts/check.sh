@@ -33,5 +33,6 @@ printf '%s\n' '{"event":"gate_state","app":"","message":"1 application(s) pendin
 sh -n scripts/install-user.sh
 sh -n integrations/swiftbar/surge-guard.5s.sh
 sh -n integrations/swiftbar/surge-guard-action.sh
+/bin/bash integrations/swiftbar/surge-guard-action.sh check-recovery
 sh integrations/swiftbar/surge-guard-action.sh --help
 git diff --check

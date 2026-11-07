@@ -68,6 +68,9 @@ Read README.md first. It is the operational contract for all three components.
 - Independent emergency/log actions must not query the guard executable, even
   for help/capabilities. A service-query error is not service absence: refuse
   anchor clearing on unexpected errors or a running job without a valid PID.
+  Recovery dependency preflight must precede service stop and user-menu replacement;
+  do not assume a `lockf` command exists. Use native flock on the existing inodes,
+  and hold management/runtime locks through final service recheck, clear and verify.
 - Document the reactive/early-boot limitations accurately. Do not market this
   external gate as guaranteed packet-by-packet enforcement.
 - A known tunnel/process loss while allowed must block before remaining probes

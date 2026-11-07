@@ -2602,3 +2602,49 @@ inspection, maintenance begin/end, Surge restart or loss, hotspot/network change
 DHCP renewal, process-specific route acceptance, optional packet-recorder changes
 or live packet-blocking/no-bypass tests. Successful deployment and fresh PF status
 do not resolve the previously documented bootstrap/hotspot/IPv6/URL-only boundaries.
+
+## 2026-11-07 — Independent recovery without a lockf executable
+
+A target-machine report established that `/usr/bin/lockf` was absent on its
+macOS 14.6.1 installation. Both the independent unlock and one native regression
+assumed that command existed. Unlock reached it only after stopping Guard;
+rendering recovery menu entries on the development Mac did not establish a usable
+recovery chain on the target. The target correctly retained its old services and
+policy instead of deploying after the failed checks.
+
+Changes:
+
+- Removed the executable dependency from recovery and tests. The fixed recovery
+  program uses system Perl core modules with native flock, private root-owned
+  directory/file validation, no-follow file opens, existing lock inodes and
+  monotonic lock deadlines. It neither downloads a runtime nor calls Guard.
+- Added the unprivileged, non-mutating `check-recovery` action. Missing fixed
+  commands, modules or native flock support fail before unlock stops a service.
+  The user installer runs it before creating backups or replacing user files.
+- Rechecks service absence after both locks are acquired and holds them through
+  own-anchor clearing and empty verification. A concurrent Start, failed query,
+  failed clear or unverified empty anchor cannot produce the success message.
+
+Performed on the macOS 15.7.7 development machine:
+
+- `scripts/check.sh` passed with 103 PASS records, including release compilation,
+  native parse-only PF checks and the new recovery dependency preflight.
+- Real system Perl executed the production lock program against private temporary
+  fixtures. Each native Swift RuntimeLock prevented clearing; after release the
+  program succeeded without replacing the lock inode. Non-private files and
+  symlink substitution were rejected.
+- The complete action ran against fake service/PF tools, including interpreter
+  failure or absence, concurrent Start, busy locks, PF clear/read failures and
+  nonempty rules. Missing dependencies never reached authentication/service stop;
+  successful preflight never queried a service. Failed installer preflight left
+  installed files and services untouched, while menu-only installation retained
+  the existing Gate sentinel and avoided service queries/restarts.
+
+Not performed: deployment or live unlock, rollback, service stop/restart, PF
+mutation, or execution on the reported macOS 14.6.1 target. That target must rerun
+the full suite and installed recovery preflight. Its separately reported native
+readiness mismatch remains unresolved: a failed Surge service-identity check also
+prevents the connection query, so the two false fields are not independent proof
+of two tunnel failures. No signature, service, connection, VIF, route or IPv6
+requirement was relaxed in this change. Do not deploy the candidate there until
+the target's native service evidence is understood and the readiness issue fixed.

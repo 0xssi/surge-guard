@@ -4,13 +4,59 @@ set -euo pipefail
 guard_bin=/Library/PrivilegedHelperTools/surge-guard
 label=io.github.surge-guard
 action=${1:---help}
+# lockf is absent on some supported macOS releases; use system Perl native flock.
+recovery_lock_program='
+use strict;
+use warnings;
+$ENV{PATH} = "/usr/bin:/bin:/usr/sbin:/sbin";
+die "Native flock unavailable\n" unless $Config::Config{d_flock} eq "define";
+clock_gettime(CLOCK_MONOTONIC);
+if (@ARGV) {
+    die "Invalid recovery arguments\n" unless @ARGV == 1 && $ARGV[0] eq "--check";
+    exit 0;
+}
+die "Root required\n" unless $> == 0;
+my @info = lstat("/private/var/db/surge-guard");
+die "Unsafe recovery directory\n" unless @info && S_ISDIR($info[2]) && $info[4] == 0 && ($info[2] & 022) == 0;
+my @locks;
+for my $path ("/private/var/db/surge-guard/management.lock", "/private/var/db/surge-guard/lock") {
+    sysopen(my $lock, $path, O_CREAT | O_RDWR | O_NOFOLLOW | O_NONBLOCK, 0600) or die "Cannot open recovery lock: $!\n";
+    my @info = stat($lock);
+    die "Unsafe recovery lock\n" unless @info && S_ISREG($info[2]) && $info[4] == 0 && ($info[2] & 077) == 0;
+    my $deadline = clock_gettime(CLOCK_MONOTONIC) + 20;
+    until (flock($lock, LOCK_EX | LOCK_NB)) {
+        die "Cannot acquire recovery lock: $!\n" unless $!{EAGAIN} || $!{EWOULDBLOCK};
+        die "Timed out waiting for recovery lock\n" if clock_gettime(CLOCK_MONOTONIC) >= $deadline;
+        sleep(0.05);
+    }
+    push @locks, $lock;
+}
+my $service = qx(/bin/launchctl print system/io.github.surge-guard 2>&1);
+die "Guard service absence not confirmed under lock; refusing to clear rules\n"
+    unless $? == (113 << 8) && $service =~ /Could not find service/;
+system("/sbin/pfctl", "-a", "io.github.surge-guard", "-F", "rules") == 0 or die "Cannot clear guard rules\n";
+my $rules = qx(/sbin/pfctl -a io.github.surge-guard -sr);
+die "Guard anchor empty state not verified\n" unless $? == 0 && $rules !~ /\S/;
+'
+recovery_lock() {
+    /usr/bin/perl -T -MConfig -MFcntl=:flock,:DEFAULT,:mode -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC,sleep -e "$recovery_lock_program" -- "$@"
+}
+check_recovery() {
+    local tool
+    for tool in /usr/bin/perl /usr/bin/logger /bin/launchctl /bin/kill /bin/sleep /sbin/pfctl /usr/bin/awk /usr/bin/sudo; do
+        [ -x "$tool" ] || { printf 'Missing recovery tool: %s; no service was stopped.\n' "$tool" >&2; return 1; }
+    done
+    recovery_lock --check || { printf '%s\n' 'Recovery flock preflight failed; no service was stopped.' >&2; return 1; }
+}
 if [ "$#" -gt 1 ]; then printf '%s\n' 'Expected one action.' >&2; exit 2; fi
 case "$action" in
-    --help) printf '%s\n' 'Actions: restart, start, unlock, backup, rollback, restore-policy, os-update-begin, os-update-end, logs, follow-logs, audit-logs, audit-requests, diagnose, diagnose-watch, doctor, open-surge, gate-update-pause, gate-update-resume, gate-start, gate-stop'; exit 0 ;;
+    --help) printf '%s\n' 'Actions: check-recovery, restart, start, unlock, backup, rollback, restore-policy, os-update-begin, os-update-end, logs, follow-logs, audit-logs, audit-requests, diagnose, diagnose-watch, doctor, open-surge, gate-update-pause, gate-update-resume, gate-start, gate-stop'; exit 0 ;;
+    check-recovery) check_recovery; printf '%s\n' 'Recovery tools and native flock available; no service or PF changes.'; exit 0 ;;
     restart|start|unlock|backup|rollback|restore-policy|os-update-begin|os-update-end|logs|follow-logs|audit-logs|audit-requests|diagnose|diagnose-watch|doctor|open-surge|gate-update-pause|gate-update-resume|gate-start|gate-stop) ;;
     *) printf '%s\n' 'Unknown recovery action.' >&2; exit 2 ;;
 esac
 if [ "$(id -u)" -eq 0 ]; then printf '%s\n' 'Run this menu action as your normal user.' >&2; exit 1; fi
+if [ "$action" = unlock ]; then check_recovery; fi
 if [ "$action" = open-surge ]; then exec /usr/bin/open -a Surge; fi
 case "$action" in
     diagnose|diagnose-watch)
@@ -137,12 +183,8 @@ if [ "$action" = unlock ]; then
         printf '%s\n' 'Guard service is still loaded; refusing to clear rules.' >&2
         exit 1
     fi
-    # Serialize the mutation with CLI management and the daemon's final block, including a concurrent Start.
-    sudo -n /usr/bin/lockf -k -t 20 /private/var/db/surge-guard/management.lock \
-        /usr/bin/lockf -k -t 20 /private/var/db/surge-guard/lock \
-        /sbin/pfctl -a "$label" -F rules
-    rules=$(sudo -n /sbin/pfctl -a "$label" -sr)
-    [ -z "$rules" ] || { printf '%s\n' 'ERROR: guard rules are still present.' >&2; exit 1; }
+    # Keep both locks through service recheck, own-anchor clearing and empty verification.
+    sudo -n /usr/bin/perl -T -MConfig -MFcntl=:flock,:DEFAULT,:mode -MTime::HiRes=clock_gettime,CLOCK_MONOTONIC,sleep -e "$recovery_lock_program"
     /usr/bin/logger -t surge-guard 'SurgeGuard manual_unlock: independent recovery verified the service absent and own anchor empty; protection off at verification; Start/End maintenance restores protection. Cached status is not live PF verification.'
     printf '%s\n' 'Verified: guard service stopped and its anchor empty. Protection is OFF. Use End maintenance if a system-update request exists; otherwise use Start guard to re-arm.'
     exit 0

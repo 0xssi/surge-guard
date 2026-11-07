@@ -116,19 +116,45 @@ func protectionTests() throws {
               "Local inventory log claimed a public outage or lost the raw error")
     print("PASS: optional LAN/USB failures revoke only their own scope and retain JSON errors")
 
-    let lockPath = directory.appendingPathComponent("recovery.lock").path
+    let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let recovery = try String(contentsOf: project.appendingPathComponent("integrations/swiftbar/surge-guard-action.sh"))
+    var program = recovery.components(separatedBy: "recovery_lock_program='\n")[1].components(separatedBy: "\n'\n")[0]
+    let managementPath = directory.appendingPathComponent("management.lock").path
+    let lockPath = directory.appendingPathComponent("lock").path
     let marker = directory.appendingPathComponent("must-not-run").path
-    do {
-        let held = try RuntimeLock(taking: open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600))
+    let service = directory.appendingPathComponent("launchctl").path
+    let pf = directory.appendingPathComponent("pfctl").path
+    try "#!/bin/sh\necho 'Could not find service'\nexit 113\n".write(toFile: service, atomically: true, encoding: .utf8)
+    try "#!/bin/sh\nif [ \"$3\" = -F ]; then /usr/bin/touch '\(marker)'; fi\n".write(toFile: pf, atomically: true, encoding: .utf8)
+    chmod(service, 0o700); chmod(pf, 0o700)
+    program = program.replacingOccurrences(of: "/private/var/db/surge-guard", with: directory.path)
+        .replacingOccurrences(of: "$> == 0", with: "$> == \(geteuid())")
+        .replacingOccurrences(of: "$info[4] == 0", with: "$info[4] == \(geteuid())")
+        .replacingOccurrences(of: "+ 20;", with: "+ 0.1;")
+        .replacingOccurrences(of: "/bin/launchctl", with: service)
+        .replacingOccurrences(of: "/sbin/pfctl", with: pf)
+    let recoveryArguments = ["-T", "-MConfig", "-MFcntl=:flock,:DEFAULT,:mode", "-MTime::HiRes=clock_gettime,CLOCK_MONOTONIC,sleep", "-e", program]
+    for path in [managementPath, lockPath] {
+        let held = try RuntimeLock(taking: open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600))
         defer { withExtendedLifetime(held) {} }
-        let refused = try Command.run("/usr/bin/lockf", ["-k", "-t", "0", lockPath, "/usr/bin/touch", marker])
+        let refused = try Command.run("/usr/bin/perl", recoveryArguments)
         try check(refused.status != 0 && !FileManager.default.fileExists(atPath: marker),
-                  "Native lockf bypassed RuntimeLock's flock and executed a recovery mutation")
+                  "System Perl bypassed a native management/runtime flock and executed a recovery mutation")
     }
-    _ = try Command.checked("/usr/bin/lockf", ["-k", "-t", "0", lockPath, "/usr/bin/touch", marker])
-    try check(FileManager.default.fileExists(atPath: marker) && FileManager.default.fileExists(atPath: lockPath),
-              "Independent recovery lock removed its inode or could not recover after release")
-    print("PASS: native lockf serializes with daemon/management flock and preserves the lock inode")
+    let before = try FileManager.default.attributesOfItem(atPath: managementPath)[.systemFileNumber] as? NSNumber
+    _ = try Command.checked("/usr/bin/perl", recoveryArguments)
+    let after = try FileManager.default.attributesOfItem(atPath: managementPath)[.systemFileNumber] as? NSNumber
+    try check(FileManager.default.fileExists(atPath: marker) && before == after,
+              "Independent recovery replaced its lock inode or could not recover after release")
+    try FileManager.default.removeItem(atPath: marker)
+    chmod(managementPath, 0o644)
+    try check(try Command.run("/usr/bin/perl", recoveryArguments).status != 0 && !FileManager.default.fileExists(atPath: marker),
+              "Recovery trusted a non-private lock file")
+    try FileManager.default.removeItem(atPath: managementPath)
+    try FileManager.default.createSymbolicLink(atPath: managementPath, withDestinationPath: lockPath)
+    try check(try Command.run("/usr/bin/perl", recoveryArguments).status != 0 && !FileManager.default.fileExists(atPath: marker),
+              "Recovery followed a substituted lock symlink")
+    print("PASS: system Perl native flock serializes both daemon/management locks, retains inodes and rejects unsafe files")
 
     let routes = (0..<8).map { RouteCheck(url: "https://example.com/\($0)", requiredGroup: "Proxy") }
     let configuration = Configuration(version: 1, mode: "routes", routeChecks: routes)

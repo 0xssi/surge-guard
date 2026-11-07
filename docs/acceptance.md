@@ -54,8 +54,14 @@ validation/application, normal restart and explicit temporary unlock. There must
 be one Surge section, and no green protection label based only on a PID.
 
 Before a system upgrade, confirm the independent recovery menu is installed and
-works offline with the currently installed version. Back up files first. Test a
-normal restart: a new PID and fresh PF status must be observed, or a timeout and
+works offline with the currently installed version. Back up files first. Run the
+`check-recovery` preflight on the target OS before any service stop. It must use
+the system native flock without assuming a `lockf` executable; missing interpreter,
+core modules or fixed tools must fail without stopping Guard or replacing menu
+files. In temporary fixtures, hold each Swift RuntimeLock and confirm recovery
+cannot clear rules; confirm a concurrent Start is rejected by the locked final
+service check. No preflight-only pass establishes that live unlock worked.
+Test a normal restart: a new PID and fresh PF status must be observed, or a timeout and
 reason shown. Do not use repeated `kickstart -k`. Exercise delayed old-process
 cleanup and an update failure in a controlled environment; verify automatic
 restoration and retain both failure/rollback logs. Confirm separate version and

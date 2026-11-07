@@ -439,9 +439,20 @@ sudo /Library/PrivilegedHelperTools/surge-guard restore-policy
 # /bin/bash integrations/swiftbar/surge-guard-action.sh unlock
 ```
 
+安装器会先检查恢复依赖，再替换用户文件。升级系统组件前先运行：
+
+```sh
+"$HOME/Library/Application Support/SurgeGuard/bin/surge-guard-action" check-recovery
+```
+
+此检查不申请管理员权限、不查询服务、不改变 PF，也不等于实测解除阻断。
+恢复使用系统 Perl 和核心模块的原生 `flock`，不依赖部分 macOS 缺少的 `lockf`
+命令，也不下载额外软件。缺少所需能力时会在停止 Guard 之前失败，此时不要继续升级。
+
 该脚本验证服务状态与 PID，等待旧进程退出并再次确认服务已卸载，再清空自身 anchor。
 清空操作持有管理锁和运行锁，避免与并发启动或守护最终阻断竞争，并记录 macOS 系统
-日志。独立入口不发布 CLI 的 unlocked 标记；菜单 stopped／unknown 不代表实时 PF 结论。
+日志。两把锁内还会复核服务缺席，并一直持锁到规则清空及验空结束；不删除或替换锁文件。
+独立入口不发布 CLI 的 unlocked 标记；菜单 stopped／unknown 不代表实时 PF 结论。
 不能把 `bootout` 返回视为进程退出；查询失败时会中止，不执行清空规则。
 
 系统备份位于 `/private/var/db/surge-guard/backups/<id>`，仅 root 可读。
