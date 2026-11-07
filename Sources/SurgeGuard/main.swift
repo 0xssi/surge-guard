@@ -18,6 +18,9 @@ final class Daemon {
     var surgeExitDetectedAt: Double?
     var surgeConnection: SCNetworkConnection?
     var surgeConnectionService: String?
+    var kernelTunnel: NativeTunnelBinding?
+    var providerExitSource: DispatchSourceProcess?
+    var providerWatchGeneration = 0
     var surgeTrust = SurgeProcessTrust()
     var surgeWatchGeneration = 0
     var nextFirewallAudit: Double = 0
@@ -152,10 +155,46 @@ final class Daemon {
 
     func watchSurgeConnection() throws -> String? {
         guard let store else { throw GuardError("Network state subscription is unavailable") }
-        let primary = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any] ?? [:]
-        guard let service = primary["PrimaryService"] as? String, Probe.isSurgeService(service, store: store) else {
+        let primary = try Probe.networkDictionary("State:/Network/Global/IPv4", read: {
+            SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString)
+        }) ?? [:]
+        guard let service = primary["PrimaryService"] as? String,
+              let interface = primary["PrimaryInterface"] as? String,
+              let connection = try Probe.serviceConnection(service, interface: interface, store: store) else {
+            try clearConfiguredTunnelWatch()
+            clearKernelTunnelWatch()
             return "primary network service is not Surge"
         }
+        if case .kernel(let binding) = connection {
+            let replaced = kernelTunnel != nil && kernelTunnel != binding || surgeConnection != nil
+            try clearConfiguredTunnelWatch()
+            if kernelTunnel != binding {
+                clearKernelTunnelWatch()
+                invalidateSession()
+                providerWatchGeneration += 1
+                let generation = providerWatchGeneration
+                let provider = binding.provider
+                let source = DispatchSource.makeProcessSource(identifier: provider.pid, eventMask: .exit, queue: .main)
+                source.setEventHandler { [weak self] in
+                    guard let self, self.providerWatchGeneration == generation,
+                          self.kernelTunnel?.provider == provider else { return }
+                    let received = SystemClock.seconds
+                    self.clearKernelTunnelWatch()
+                    self.invalidateSession()
+                    self.reconcile(forceFirewallAudit: true, lossReason: "surge_tunnel_provider_exited", detectedAt: received)
+                }
+                kernelTunnel = binding
+                providerExitSource = source
+                source.resume()
+                guard try SurgeProcess.read(pid: provider.pid) == provider else {
+                    clearKernelTunnelWatch()
+                    throw GuardError("Surge tunnel provider changed during exit subscription")
+                }
+            }
+            return replaced ? "surge_tunnel_owner_changed" : nil
+        }
+        let replacedKernel = kernelTunnel != nil
+        clearKernelTunnelWatch()
         if surgeConnectionService != service {
             var context = SCNetworkConnectionContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
                                                      retain: nil, release: nil, copyDescription: nil)
@@ -175,7 +214,23 @@ final class Daemon {
             surgeConnectionService = service
         }
         guard let connection = surgeConnection else { throw GuardError("Surge tunnel subscription is unavailable") }
-        return Probe.connectionLossReason(SCNetworkConnectionGetStatus(connection))
+        return replacedKernel ? "surge_tunnel_owner_changed" : Probe.connectionLossReason(SCNetworkConnectionGetStatus(connection))
+    }
+
+    func clearConfiguredTunnelWatch() throws {
+        if let connection = surgeConnection, !SCNetworkConnectionSetDispatchQueue(connection, nil) {
+            throw GuardError("Cannot remove the previous Surge tunnel subscription")
+        }
+        surgeConnection = nil
+        surgeConnectionService = nil
+    }
+
+    func clearKernelTunnelWatch() {
+        if kernelTunnel != nil { invalidateSession() }
+        providerWatchGeneration += 1
+        kernelTunnel = nil
+        providerExitSource?.cancel()
+        providerExitSource = nil
     }
 
     func reconcile(forceFirewallAudit: Bool = false, lossReason: String? = nil, detectedAt: Double? = nil) {
@@ -474,7 +529,8 @@ final class Daemon {
         guard let store,
               SCDynamicStoreSetNotificationKeys(store,
                 ["State:/Network/Global/IPv4", "State:/Network/Global/IPv6"] as CFArray,
-                ["State:/Network/Service/.*/IPv[46]", "State:/Network/Service/.*/VPN"] as CFArray),
+                ["State:/Network/Service/.*/IPv[46]", "State:/Network/Service/.*/VPN",
+                 "State:/Network/Interface/.*/Link", "Setup:/Network/Service/.*/VPN"] as CFArray),
               let source = SCDynamicStoreCreateRunLoopSource(nil, store, 0) else {
             throw GuardError("Cannot subscribe to network state changes")
         }

@@ -48,6 +48,17 @@ For each transition, record the time, `surge-guard check`, root `status`, logs, 
 
 ## Companion and menu acceptance
 
+For a primary tunnel absent from Setup/SCPreferences, also verify the
+[kernel ownership backend](native-tunnel.md) with administrator read-only doctor.
+Confirm the signed provider's native PID/birth identity and connected kernel
+control socket resolve to the actual primary VIF. An unprivileged descriptor
+query may be unavailable and must never borrow a cached success. In an authorized
+disposable session, test provider exit, socket closure while the provider remains,
+FD/PID reuse, ambiguous providers and primary/Setup changes. Confirm old callbacks
+cannot reopen protection and route evidence is invalidated. Socket-close event
+latency, the fallback poll and physical packet behavior are separate evidence.
+Do not disconnect or kill a production tunnel merely to pass source acceptance.
+
 Use a disposable/saved application session. Validate both light and dark menu
 appearance, current reasons, diagnostics, retained-then-follow logs, policy draft
 validation/application, normal restart and explicit temporary unlock. There must

@@ -244,6 +244,10 @@ public enum Probe {
     }
 
     public static func surgeCandidates() throws -> [SurgeProcess] {
+        try processCandidates(name: "Surge")
+    }
+
+    private static func processCandidates(name: String) throws -> [SurgeProcess] {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL]
         for _ in 0..<3 {
             var size = 0
@@ -258,11 +262,20 @@ public enum Probe {
                   size <= records.count * MemoryLayout<kinfo_proc>.stride else {
                 throw GuardError("Cannot read complete native process inventory: errno \(errno)")
             }
-            return records.prefix(size / MemoryLayout<kinfo_proc>.stride).compactMap { info in
-                let name = withUnsafeBytes(of: info.kp_proc.p_comm) {
+            return try records.prefix(size / MemoryLayout<kinfo_proc>.stride).compactMap { info in
+                let command = withUnsafeBytes(of: info.kp_proc.p_comm) {
                     String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self)
                 }
-                guard name == "Surge" else { return nil }
+                guard !command.isEmpty, name.hasPrefix(command) else { return nil }
+                if name != command {
+                    // p_comm can truncate a system extension's name; resolve it natively.
+                    var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+                    guard proc_pidpath(info.kp_proc.p_pid, &path, UInt32(path.count)) > 0 else {
+                        if try SurgeProcess.read(pid: info.kp_proc.p_pid) == nil { return nil }
+                        throw GuardError("Cannot inspect candidate process path: errno \(errno)")
+                    }
+                    guard URL(fileURLWithPath: String(cString: path)).lastPathComponent == name else { return nil }
+                }
                 let started = info.kp_proc.p_un.__p_starttime
                 return SurgeProcess(pid: info.kp_proc.p_pid, startedSeconds: Int(started.tv_sec),
                                     startedMicroseconds: Int(started.tv_usec))
@@ -272,8 +285,12 @@ public enum Probe {
     }
 
     public static func surgeSignatureValid(_ pid: pid_t) -> Bool {
+        processSignatureValid(pid, identifier: "com.nssurge.surge-mac")
+    }
+
+    private static func processSignatureValid(_ pid: pid_t, identifier: String) -> Bool {
         var requirement: SecRequirement?
-        let identity = "anchor apple generic and identifier \"com.nssurge.surge-mac\" and certificate leaf[subject.OU] = \"YCKFLA6N72\""
+        let identity = "anchor apple generic and identifier \"\(identifier)\" and certificate leaf[subject.OU] = \"YCKFLA6N72\""
         guard SecRequirementCreateWithString(identity as CFString, SecCSFlags(rawValue: 0), &requirement) == errSecSuccess,
               let requirement else { return false }
         var code: SecCode?
@@ -309,8 +326,9 @@ public enum Probe {
     public static func surgeInterface() throws -> String {
         guard let store = SCDynamicStoreCreate(nil, "surge-guard.interface" as CFString, nil, nil),
               let primary = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
-              let service = primary["PrimaryService"] as? String, isSurgeService(service, store: store),
               let interface = primary["PrimaryInterface"] as? String,
+              let service = primary["PrimaryService"] as? String,
+              try serviceConnection(service, interface: interface, store: store) != nil,
               try addresses().contains(where: { $0.name == interface && $0.up && $0.address == "198.18.0.1" }) else {
             throw GuardError("Verified Surge interface is unavailable")
         }
@@ -318,9 +336,49 @@ public enum Probe {
     }
 
     public static func isSurgeService(_ service: String, store: SCDynamicStore) -> Bool {
-        guard !service.isEmpty,
-              let vpn = SCDynamicStoreCopyValue(store, "Setup:/Network/Service/\(service)/VPN" as CFString) as? [String: Any] else { return false }
-        return vpn["NEProviderBundleIdentifier"] as? String == "com.nssurge.surge-mac.ne"
+        guard let primary = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
+              primary["PrimaryService"] as? String == service,
+              let interface = primary["PrimaryInterface"] as? String else { return false }
+        return (try? serviceConnection(service, interface: interface, store: store)) != nil
+    }
+
+    public static func serviceConnection(_ service: String, interface: String, store: SCDynamicStore) throws -> SurgeServiceConnection? {
+        try serviceConnection(service, interface: interface,
+                              read: { key in try networkDictionary(key, read: { SCDynamicStoreCopyValue(store, key as CFString) }) },
+                              kernel: kernelTunnelBinding)
+    }
+
+    // Separate input reads from native attribution so absent, malformed and failed
+    // Setup reads cannot be confused in regression fixtures.
+    public static func serviceConnection(_ service: String, interface: String,
+                                         read: (String) throws -> [String: Any]?,
+                                         kernel: (String) throws -> NativeTunnelBinding?) throws -> SurgeServiceConnection? {
+        guard !service.isEmpty, !service.utf8.contains(0) else { return nil }
+        let setupKey = "Setup:/Network/Service/\(service)/VPN"
+        if let vpn = try read(setupKey) {
+            return vpn["NEProviderBundleIdentifier"] as? String == "com.nssurge.surge-mac.ne" ? .configured : nil
+        }
+        guard interface.hasPrefix("utun"), let unit = UInt32(interface.dropFirst(4)),
+              "utun\(unit)" == interface else { return nil }
+        guard let binding = try kernel(interface), binding.interface == interface else { return nil }
+        // Reject a primary-service/interface change during native PID/FD inspection.
+        guard try read(setupKey) == nil, let current = try read("State:/Network/Global/IPv4"),
+              current["PrimaryService"] as? String == service,
+              current["PrimaryInterface"] as? String == interface else { return nil }
+        return .kernel(binding)
+    }
+
+    private static func kernelTunnelBinding(interface: String) throws -> NativeTunnelBinding? {
+        let identifier = "com.nssurge.surge-mac.ne"
+        let candidates = try processCandidates(name: identifier)
+        var trust = SurgeProcessTrust()
+        guard let pid = try trust.trustedPID(candidates: candidates,
+                                             validate: { processSignatureValid($0, identifier: identifier) },
+                                             recheck: { try processCandidates(name: identifier) }),
+              let provider = candidates.first, provider.pid == pid,
+              let binding = try NativeTunnelBinding.read(provider: provider, interface: interface),
+              try processCandidates(name: identifier) == candidates else { return nil }
+        return binding
     }
 
     public static func connectionLossReason(_ status: SCNetworkConnectionStatus) -> String? {
@@ -355,14 +413,20 @@ public enum Probe {
         let service = primary["PrimaryService"] as? String ?? ""
         let interface = primary["PrimaryInterface"] as? String ?? ""
         let ipv6Interface = globalIPv6.map { $0["PrimaryInterface"] as? String ?? "" }
-        let surgeService = isSurgeService(service, store: store)
-        let connection = surgeService ? SCNetworkConnectionCreateWithServiceID(nil, service as CFString, nil, nil) : nil
-        let connected = connection.map { SCNetworkConnectionGetStatus($0) == .connected } ?? false
+        let serviceConnection = try serviceConnection(service, interface: interface, store: store)
+        let connected: Bool
+        switch serviceConnection {
+        case .configured:
+            connected = SCNetworkConnectionCreateWithServiceID(nil, service as CFString, nil, nil)
+                .map { SCNetworkConnectionGetStatus($0) == .connected } ?? false
+        case .kernel: connected = true // Verified connected kernel-control socket, not a VPN status integer.
+        case nil: connected = false
+        }
         let vifUp = try interface.hasPrefix("utun") && addresses().contains {
             $0.name == interface && $0.up && $0.address == "198.18.0.1"
         }
         let route = try Command.checked("/sbin/route", ["-n", "get", "default"])
-        return Readiness(trustedProcess: try trustedProcess ?? trustedSurgeRunning(), surgeService: surgeService,
+        return Readiness(trustedProcess: try trustedProcess ?? trustedSurgeRunning(), surgeService: serviceConnection != nil,
                          connected: connected, vifUp: vifUp,
                          ownsDefaultRoute: !interface.isEmpty && Policy.defaultInterface(route) == interface,
                          ipv6Safe: Policy.ipv6Safe(primaryInterface: ipv6Interface, surgeInterface: interface))

@@ -94,6 +94,14 @@ Only an explicit missing IPv6 store key means no global IPv6 route. Store errors
 non-dictionary values and a present dictionary without a valid primary interface
 fail closed.
 
+This local implementation also supports a primary tunnel with no Setup VPN
+dictionary by attributing its connected utun kernel-control socket to the
+official signed running Network Extension. Existing configured services retain
+their native connection-status path. This backend requires administrator access
+for fresh descriptor inspection on the target system; unprivileged checks report
+that limitation. Read [native tunnel ownership](docs/native-tunnel.md) for the
+exact checks, event handling and remaining live acceptance scope.
+
 For additional routing conditions, copy and edit a local policy:
 
 ```sh

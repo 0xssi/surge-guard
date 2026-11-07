@@ -132,6 +132,7 @@ do {
     try diagnosticTests()
     try usbTCPTests()
     try protectionTests()
+    try nativeTunnelTests()
     let gateActions = ["install", "setup", "run", "start", "stop", "restart", "uninstall", "edit-config", "update-pause", "update-resume"]
     for action in gateActions {
         try check(try GateCommand.action([action]) == action, "Valid Gate action rejected")

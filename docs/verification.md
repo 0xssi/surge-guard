@@ -2648,3 +2648,98 @@ prevents the connection query, so the two false fields are not independent proof
 of two tunnel failures. No signature, service, connection, VIF, route or IPv6
 requirement was relaxed in this change. Do not deploy the candidate there until
 the target's native service evidence is understood and the readiness issue fixed.
+
+## Local native kernel ownership implementation — 2026-11-07
+
+Created an independent local repository from upstream 51c5b19. The new backend
+uses native ownership of a connected utun kernel-control socket by the official
+signed NE process. It does not use an older installation's compatibility code
+or an observed VPN status number. Configured services retain the upstream
+provider/SCNetworkConnection path; only an explicitly absent Setup VPN key may
+select native attribution.
+
+Performed before installation:
+
+- scripts/check.sh completed with exit 0 and 106 PASS records, including a
+  warnings-as-errors release build, the existing checks and three new native
+  regression groups. Nonfatal CLT XCTest-path and Perl locale warnings remain.
+- New fixtures reject unrelated controllers/families/protocols, unusable socket
+  states, zero units, ambiguous sockets, PID birth changes, FD/socket reuse,
+  disappearing descriptors, original query errors, explicit wrong/malformed
+  providers, failed reads and primary/Setup changes during inspection.
+- On macOS 14.6.1 / arm64 with Surge 6.11.0, an independent read-only native
+  query confirmed the official provider holds a connected utun control socket
+  mapping to the current primary VIF. Candidate release administrator doctor
+  then independently returned fresh ready=true with all six readiness fields
+  true and the current routes policy satisfied. PF was enabled with the own
+  attachment first. Private raw evidence remains outside this repository.
+- Reviewed shared readiness/VIF/backend selection and both subscription paths.
+  The kernel path watches native provider exit and network changes, rejects
+  obsolete provider callbacks, invalidates route evidence on binding changes
+  and retains the existing fallback poll and PF/route freshness limits.
+- No production dependency, root RPC service, network preference or PF rule
+  exception was introduced. Fresh ownership reads require administrator access
+  on this target; an ordinary user's inaccessible probe remains an error.
+
+These are source, build and read-only observations. They do not establish live
+provider-loss/socket-close latency, packet coverage, reboot/login, sleep/wake,
+LAN/USB connectivity, rollback or emergency unlock. Installation and new running
+process/PF acceptance must be recorded separately.
+
+## Deployment of the local native implementation — 2026-11-07
+
+Deployed code commit 0319e32 after the preceding complete 106-PASS check and
+candidate administrator read-only readiness verification. No older compatibility
+implementation was used as the source for this backend.
+
+Performed:
+
+- Created another private user-component/configuration snapshot while preserving
+  prior backups. Installed recovery-only files as the ordinary user, verified
+  installed check-recovery and exact renderer/action/menu source equality, and
+  retained the existing single 30-second SwiftBar shell and recovery actions.
+- The first system installer attempt was refused while its privileged install
+  subprocess read a Documents build path, before stopping/replacing the old
+  service. Retained the original error and confirmed the old PID remained
+  running/allowed. Retried the same installer from a private temporary directory
+  after byte-for-byte verification of the same Guard/launcher binaries. It saved
+  its trusted backup, updated/restarted Guard and verified ALLOWED under the
+  unchanged existing policy. No access-control or system-protection setting was
+  changed. Temporary deployment copies were removed after verification.
+- Installed Gate as the ordinary user, then required fresh new-process status
+  before applying the requested persistent/local TCP routes policy through the
+  installed Guard configure command. Existing Gate configuration remained
+  byte-for-byte unchanged. Exact configured target-group/proxy matching passed
+  without a final-node allowlist.
+- Gate performed normal quit/submission/observation for dedicated Surge startup.
+  Fresh Gate status verified the dedicated group. No forced process termination
+  or ordinary-group egress exception was used.
+- Installed Guard, launcher, Gate, user renderer and independent menu/action
+  scripts matched the checked release/source byte-for-byte. Guard was root-owned
+  0755; launcher root:_surge_guard 2755; user executables were console-user-owned
+  0700. The ordinary-user launcher check passed without launching an app.
+- Installed administrator read-only doctor returned all six fresh readiness
+  checks true. PF was enabled, the own attachment was first, and each persistent
+  VIF/group/TCP-block rule was present. Both allow rules retained if-bound state.
+  Fresh status reported routes / persistent_tcp_egress, local TCP enabled with
+  one effective LAN binding, no optional inventory errors and no attached USB
+  binding. No actual LAN/USB endpoint connectivity test was performed.
+- In a bounded roughly 35-second observation, all 63 samples were allowed /
+  persistent_tcp_egress with Gate fresh/ready and zero pending apps. Maximum
+  recorded ages were 1.528 seconds for Guard, 5.985 for PF verification and 1.022
+  for Gate; Guard/Gate PIDs remained unchanged.
+- The existing shell still emitted the single size-12 circle title, one section
+  per component, the required refresh item and all management/recovery/diagnostic/
+  update/power actions. Parent colors and action refresh flags remained intact.
+  SwiftBar accepted manual refresh and logged successive automatic executions
+  about 30 seconds apart, without restarting services. Its login registration
+  remained enabled/allowed. The interface attachment timed out again; visual
+  and submenu-click acceptance are not claimed.
+
+Not performed: actual logout/login, reboot, light/dark visual inspection, submenu
+clicks after live refresh, provider-loss/socket-close fault tests, network changes,
+sleep/wake, emergency unlock/rollback execution, maintenance, packet recording
+or packet-level/no-bypass acceptance. The kernel backend remains reactive on
+available events plus the existing fallback poll; there is no fixed FD-closure
+notification deadline. URL-default-context route matching is not PROCESS-NAME
+acceptance, and fresh status does not prove universal packet coverage.
