@@ -2563,3 +2563,42 @@ Performed:
 Not performed: reinstalling or restarting services, a real failed Surge launch,
 live PF mutation or packet-level acceptance. Bootstrap, hotspot and IPv6 policy
 boundaries were not changed or validated on a live network in this correction.
+
+## 2026-11-06 — Local deployment of the reviewed fixes
+
+Deployed source revision `f7ca0d0`, including `4f7c2d5` and `cd0656f`, using the
+existing installed policy. This was an authorized local service update, not a
+change to bootstrap, hotspot, IPv6 or process-specific routing policy.
+
+Performed:
+
+- Rebuilt release executables with warnings as errors. The unchanged source had
+  already passed the preceding `scripts/check.sh` run with 101 PASS records;
+  this deployment did not repeat that suite or infer packet coverage from it.
+- Installed the recovery-only user files first, retaining installer backups.
+  Verified the existing combined SwiftBar plugin invokes the independent menu,
+  the rendered emergency/backup entries are present, and the action/menu files
+  match the tracked sources with private user ownership/modes. SwiftBar was
+  running and its macOS background-item registration was enabled and allowed.
+- Used the built Guard installer with administrator authentication. It saved a
+  protected update backup, stopped/replaced/restarted the existing service and
+  reported verified `ALLOWED` for the replacement. No unlock or manual PF load
+  was used. Updated Gate through its normal-user installer afterward.
+- Compared installed Guard, launcher, Gate, user renderer and recovery scripts
+  byte-for-byte with the current build/source. Verified root ownership and 0755
+  for Guard, root/dedicated-group ownership and 2755 for the launcher, and user
+  ownership with 0700 for the user executables/scripts.
+- Both services published fresh status with new PID/run identities in the same
+  boot: Guard `allowed`, Gate `ready`. All six readiness checks passed; a later
+  status read still had a fresh PF audit and no local-TCP inventory errors.
+- Privileged read-only `doctor` confirmed PF enabled, the Guard anchor first,
+  and the expected persistent TCP VIF/group/block rules with interface-bound
+  states. System policy, Gate configuration and the persistent Surge update
+  pause record remained byte-for-byte unchanged; the route-policy fingerprint
+  also matched. The original verified dedicated-group Surge process was retained.
+
+Not performed: emergency unlock/rollback execution, reboot/login, SwiftBar visual
+inspection, maintenance begin/end, Surge restart or loss, hotspot/network changes,
+DHCP renewal, process-specific route acceptance, optional packet-recorder changes
+or live packet-blocking/no-bypass tests. Successful deployment and fresh PF status
+do not resolve the previously documented bootstrap/hotspot/IPv6/URL-only boundaries.
